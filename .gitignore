@@ -1,0 +1,13 @@
+/target
+
+# AI workflow artifacts - never pushed to remote
+.claude/
+docs/superpowers/
+.qecs/
+
+# secrets / local state
+.env
+.env.*
+*.tfstate
+*.tfstate.*
+keys/
