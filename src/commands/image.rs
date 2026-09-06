@@ -180,6 +180,7 @@ async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs) -> anyhow::Result<()> 
         &project.id,
         &job_id,
         &poll_cfg,
+        ctx.telemetry.as_ref(),
     )
     .await
     .context("waiting for IMS image creation job to complete")?;

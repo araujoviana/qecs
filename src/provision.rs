@@ -253,6 +253,7 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
         &project.id,
         &job_id,
         &poll_cfg,
+        ctx.telemetry.as_ref(),
     )
     .await
     .context("waiting for ECS create job to finish")?;
@@ -262,9 +263,16 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
         .first()
         .context("create job completed without returning a server_id")?;
 
-    let server = ecs::wait_active(&client, &region, &project.id, server_id, &poll_cfg)
-        .await
-        .context("waiting for server to reach ACTIVE status")?;
+    let server = ecs::wait_active(
+        &client,
+        &region,
+        &project.id,
+        server_id,
+        &poll_cfg,
+        ctx.telemetry.as_ref(),
+    )
+    .await
+    .context("waiting for server to reach ACTIVE status")?;
 
     let rec = VmRecord {
         id: server.id,

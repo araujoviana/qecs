@@ -12,7 +12,7 @@ use std::time::Instant;
 pub struct SignedClient {
     http: reqwest::Client,
     creds: Credentials,
-    telemetry: Option<Telemetry>,
+    pub telemetry: Option<Telemetry>,
 }
 
 #[derive(Debug)]

@@ -2,6 +2,7 @@
 use crate::hwc::client::SignedClient;
 use crate::hwc::endpoints::{Service, endpoint_host};
 use crate::hwc::wait::{Poll, PollConfig, poll_until};
+use crate::telemetry::Telemetry;
 use serde::Deserialize;
 
 /// Result of a completed (SUCCESS) job.
@@ -117,19 +118,26 @@ pub async fn poll_job(
     project_id: &str,
     job_id: &str,
     cfg: &PollConfig,
+    tel: Option<&Telemetry>,
 ) -> anyhow::Result<JobResult> {
+    let tel = tel.or(c.telemetry.as_ref());
     let url = job_url(service, region, project_id, job_id);
-    poll_until(cfg, &format!("job {job_id}"), || async {
-        let resp: JobResp = c
-            .send_json(reqwest::Method::GET, &url, None)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        match job_outcome(resp) {
-            Poll::Ready(Ok(r)) => Ok(Poll::Ready(r)),
-            Poll::Ready(Err(e)) => Err(e),
-            Poll::Pending => Ok(Poll::Pending),
-        }
-    })
+    poll_until(
+        cfg,
+        &format!("job {job_id}"),
+        || async {
+            let resp: JobResp = c
+                .send_json(reqwest::Method::GET, &url, None)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+            match job_outcome(resp) {
+                Poll::Ready(Ok(r)) => Ok(Poll::Ready(r)),
+                Poll::Ready(Err(e)) => Err(e),
+                Poll::Pending => Ok(Poll::Pending),
+            }
+        },
+        tel,
+    )
     .await
 }
 

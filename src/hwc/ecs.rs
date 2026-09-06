@@ -3,6 +3,7 @@
 use crate::hwc::client::SignedClient;
 use crate::hwc::endpoints::{Service, endpoint_host};
 use crate::hwc::wait::{Poll, PollConfig, poll_until};
+use crate::telemetry::Telemetry;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -263,15 +264,22 @@ pub async fn wait_active(
     project_id: &str,
     id: &str,
     cfg: &PollConfig,
+    tel: Option<&Telemetry>,
 ) -> anyhow::Result<Server> {
-    poll_until(cfg, &format!("server {id} ACTIVE"), || async {
-        let s = get_server(c, region, project_id, id).await?;
-        Ok(match s.status.as_str() {
-            "ACTIVE" => Poll::Ready(s),
-            "ERROR" => anyhow::bail!("server {id} entered ERROR"),
-            _ => Poll::Pending,
-        })
-    })
+    let tel = tel.or(c.telemetry.as_ref());
+    poll_until(
+        cfg,
+        &format!("server {id} ACTIVE"),
+        || async {
+            let s = get_server(c, region, project_id, id).await?;
+            Ok(match s.status.as_str() {
+                "ACTIVE" => Poll::Ready(s),
+                "ERROR" => anyhow::bail!("server {id} entered ERROR"),
+                _ => Poll::Pending,
+            })
+        },
+        tel,
+    )
     .await
 }
 

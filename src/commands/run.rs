@@ -272,6 +272,7 @@ pub async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Resul
         &project.id,
         &job_id,
         &PollConfig::default(),
+        ctx.telemetry.as_ref(),
     )
     .await;
 

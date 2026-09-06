@@ -110,6 +110,7 @@ pub async fn reconcile_and_purge(ctx: &Ctx) -> anyhow::Result<GcStats> {
             &project.id,
             &job_id,
             &PollConfig::default(),
+            ctx.telemetry.as_ref(),
         )
         .await?;
         for id in &dead_servers {

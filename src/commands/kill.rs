@@ -32,6 +32,7 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
             &project.id,
             &job_id,
             &PollConfig::default(),
+            ctx.telemetry.as_ref(),
         )
         .await?;
         pb.finish_and_clear();
@@ -66,6 +67,7 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
             &project.id,
             &job_id,
             &PollConfig::default(),
+            ctx.telemetry.as_ref(),
         )
         .await?;
         let _ = store.remove(name);

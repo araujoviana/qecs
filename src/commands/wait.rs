@@ -152,6 +152,7 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
         &project.id,
         &job_id,
         &PollConfig::default(),
+        ctx.telemetry.as_ref(),
     )
     .await;
     let _ = store.remove(&vm.name);

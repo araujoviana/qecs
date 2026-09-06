@@ -209,9 +209,12 @@ pub async fn ensure_subnet(
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     let created = resp.subnet;
-    let ready = poll_until(&PollConfig::default(), "subnet ACTIVE", || async {
-        subnet_ready(&get_subnet(c, region, project_id, &created.id).await?)
-    })
+    let ready = poll_until(
+        &PollConfig::default(),
+        "subnet ACTIVE",
+        || async { subnet_ready(&get_subnet(c, region, project_id, &created.id).await?) },
+        c.telemetry.as_ref(),
+    )
     .await?;
     Ok(ready)
 }
