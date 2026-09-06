@@ -18,6 +18,8 @@ Provisioning lands next.
     qecs presets     # show presets and their flavors
     qecs setup       # write config, check credentials
 
+Tracing: `qecs run --telemetry` writes a JSONL trace to `~/.local/state/qecs/traces/`.
+
 More commands arrive with the provisioning branch.
 
 ## Development

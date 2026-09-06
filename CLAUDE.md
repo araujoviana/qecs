@@ -84,13 +84,9 @@ Developer and tooling variables:
   (incl. no prefix) -> patch. Run `bash scripts/install-hooks.sh` once
   (`git config core.hooksPath .githooks`). For a manual `git commit --amend`, set
   `QECS_NO_BUMP=1` to avoid a double bump. Tags/releases are cut from CI on version change.
-- **Feature-branch roadmap** (branches 0-8, full detail in the spec). Branches 0-1 (scaffold +
-  HWC API) are **done**. Next: branch 2 `provision-core` - `qecs up/kill/ls/info/gc`,
-  idempotent VPC/subnet/SG ensure, base cloud-init, create+wait, plus `qecs setup` and IAM
-  project_id discovery. Then: connect (SSH 22->443->console), run (detector ladder), lifecycle
-  (on-VM guard: hard TTL + idle shutdown), gpu, image-bake, tunnel.
-- Currently only `presets` is implemented; every other subcommand is a `todo_stub` that
-  bails with "not implemented yet".
+- **Feature-branch roadmap** (branches 0-9, full detail in the spec). Branches 0-9 are **done**
+  (scaffold, HWC API, provision-core, connect, run, lifecycle, gpu, image-bake, tunnel, telemetry).
+  All subcommands are implemented and covered by tests.
 - Parallel/subagent work uses **git worktrees** (native EnterWorktree or `git worktree add`).
 - The spec and plan live in `docs/superpowers/` (gitignored, local only) - read them for full
   detail on any subsystem:
