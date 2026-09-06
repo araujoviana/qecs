@@ -10,19 +10,21 @@ pub fn build_ssh_args(
     key_path: &Path,
     proxy_command: Option<&str>,
 ) -> Vec<String> {
-    // Ephemeral VMs recycle elastic IPs, so trusting/recording host keys just
-    // produces spurious mismatch failures later; BatchMode keeps a failed key
+    // Host-key verification stays on (trust-on-first-use), but in a qecs-owned
+    // known_hosts file so ephemeral VMs churning a recycled elastic-IP pool
+    // never wedge the user's ~/.ssh/known_hosts. BatchMode keeps a failed key
     // auth from blocking a non-interactive `qecs run` on a password prompt; the
     // keepalives stop a long silent attached job from being dropped by NAT.
+    let known_hosts = crate::keys::qecs_known_hosts_path();
     let mut args = vec![
         "-i".to_string(),
         key_path.to_string_lossy().to_string(),
         "-p".to_string(),
         port.to_string(),
         "-o".to_string(),
-        "StrictHostKeyChecking=no".to_string(),
+        "StrictHostKeyChecking=accept-new".to_string(),
         "-o".to_string(),
-        "UserKnownHostsFile=/dev/null".to_string(),
+        format!("UserKnownHostsFile={}", known_hosts.to_string_lossy()),
         "-o".to_string(),
         "BatchMode=yes".to_string(),
         "-o".to_string(),
@@ -107,9 +109,12 @@ mod tests {
         let args = build_ssh_args("1.2.3.4", 22, &key, None).join(" ");
         // never block a script on a password prompt
         assert!(args.contains("BatchMode=yes"));
-        // ephemeral VMs recycle EIPs -> never write/trust ~/.ssh/known_hosts
-        assert!(args.contains("StrictHostKeyChecking=no"));
-        assert!(args.contains("UserKnownHostsFile=/dev/null"));
+        // keep trust-on-first-use host-key verification, but in a qecs-owned
+        // known_hosts file so recycled elastic IPs never wedge ~/.ssh/known_hosts
+        assert!(args.contains("StrictHostKeyChecking=accept-new"));
+        assert!(args.contains("UserKnownHostsFile="));
+        assert!(!args.contains("UserKnownHostsFile=/dev/null"));
+        assert!(args.contains("qecs/known_hosts"));
         // don't hang forever on a black-holed port; keep long attached jobs alive
         assert!(args.contains("ConnectTimeout="));
         assert!(args.contains("ServerAliveInterval="));

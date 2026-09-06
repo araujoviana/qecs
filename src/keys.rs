@@ -17,6 +17,19 @@ pub fn default_key_dir() -> PathBuf {
         .join("keys")
 }
 
+/// qecs-owned `known_hosts` file: `~/.config/qecs/known_hosts`.
+///
+/// Kept separate from the user's `~/.ssh/known_hosts` so that ephemeral VMs
+/// churning through a recycled elastic-IP pool never wedge the user's real
+/// host-key database, while still giving trust-on-first-use verification
+/// (a later connection to a changed key on the same address fails closed).
+pub fn qecs_known_hosts_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from(".config"))
+        .join("qecs")
+        .join("known_hosts")
+}
+
 /// Ensure that the dedicated `id_qecs` ed25519 keypair exists in `key_dir`.
 /// If missing, generate it via `ssh-keygen`. Returns the paths and the public key content.
 pub fn ensure_keypair(key_dir: Option<&Path>) -> anyhow::Result<(KeyPairPaths, String)> {
