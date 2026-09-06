@@ -4,12 +4,12 @@ use crate::hwc::client::SignedClient;
 use crate::hwc::endpoints::{Service, endpoint_host};
 use crate::hwc::wait::{Poll, PollConfig, poll_until};
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 /// One ECS server, flattened from HWC's raw response (the `OS-EXT-*` colon keys
 /// make `#[derive(Deserialize)]` painful, so `from_raw` walks the `Value` by hand).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Server {
     pub id: String,
     pub name: String,

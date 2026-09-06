@@ -58,7 +58,7 @@ pub enum Commands {
     Presets,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct RunArgs {
     pub path: Option<PathBuf>,
     #[arg(long)]
@@ -77,7 +77,7 @@ pub struct RunArgs {
     pub dry_run: bool,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct UpArgs {
     #[arg(long)]
     pub preset: Option<String>,
@@ -89,29 +89,29 @@ pub struct UpArgs {
     pub dry_run: bool,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct ShellArgs {
     pub name: Option<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct InfoArgs {
     pub name: String,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct LogsArgs {
     pub target: String,
     #[arg(long)]
     pub follow: bool,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct WaitArgs {
     pub job: String,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct KillArgs {
     #[arg(required_unless_present = "all")]
     pub name: Option<String>,
