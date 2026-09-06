@@ -1,42 +1,122 @@
 # qecs
 
-Provision a strong, ephemeral Huawei Cloud VM, run one job on it, and throw it
-away before it costs money.
+Provision a strong, ephemeral Huawei Cloud (HWC) VM, run one job on it, and throw it away before it costs money.
 
-## Status
+## Workflows
 
-Early. The command surface exists and Huawei Cloud authentication works.
-Provisioning lands next.
+qecs supports two primary workflows:
 
-## Install
+- **Abstracted (`qecs run`)**: Package your local directory, ship it to a fresh VM, auto-detect the project stack (Rust Cargo, Python uv/pip, Docker, npm/pnpm, bash script), stream the remote execution logs, retrieve `./out` artifacts back locally, and automatically destroy the VM.
+- **Interactive (`qecs up` / `qecs shell`)**: Bring up an on-demand VM with hard TTL and idle-shutdown protection, shell in, and destroy it when finished.
 
-    cargo install --path .
-    bash scripts/install-hooks.sh   # contributors only
+## Installation
 
-## Usage
+```bash
+cargo install --path .
+bash scripts/install-hooks.sh   # contributors only: enables version bump hook
+```
 
-    qecs presets     # show presets and their flavors
-    qecs setup       # write config, check credentials
+## Quick Start
 
-Tracing: `qecs run --telemetry` writes a JSONL trace to `~/.local/state/qecs/traces/`.
+```bash
+# 1. Configure credentials and preferred region
+qecs setup
 
-More commands arrive with the provisioning branch.
+# 2. View available hardware presets
+qecs presets
+
+# 3. Ship and run the current directory on an ephemeral machine
+qecs run .
+
+# Or run with GPU preset and detached execution
+qecs run --preset gpu --detach .
+qecs logs
+qecs wait
+```
+
+## Presets
+
+Ephemeral VMs default to capable hardware shapes:
+
+| Preset | Default Flavor | Specs | Disk (GPSSD) |
+|---|---|---|---|
+| `normal` | `s7n.2xlarge.2` | 8 vCPU / 16 GB | 100 GB |
+| `ram` | `m7.4xlarge.8` | 16 vCPU / 128 GB | 100 GB |
+| `compute` | `c7.8xlarge.2` | 32 vCPU / 64 GB | 100 GB |
+| `gpu` | `pi2.4xlarge.4` | 16 vCPU / 64 GB / 2x T4 | 200 GB |
+| `beefy` | `p2s.8xlarge.8` | 32 vCPU / 256 GB / 4x V100 | 300 GB |
+
+Presets and flavor mappings can be customized in `~/.config/qecs/config.toml`. Ad-hoc overrides can be passed via `--flavor <name>`.
+
+## CLI Commands
+
+### Execution & Provisioning
+- `qecs run [PATH]`: package workdir, provision VM, run job, download artifacts, destroy.
+  - `--preset <NAME>`: choose hardware preset (`normal`, `ram`, `compute`, `gpu`, `beefy`).
+  - `--flavor <FLAVOR>`: explicit Huawei Cloud flavor ID override.
+  - `--ttl <DURATION>`: execution time limit before guard terminates the machine (default: `1h`).
+  - `--detach`: submit job in background and exit immediately.
+  - `--keep`: keep the VM alive after job execution completes.
+  - `--output <PATH>`: custom destination directory for remote `./out` artifacts.
+  - `--dry-run`: display resolved detector ladder recipe and configuration without provisioning.
+  - `--telemetry`: emit execution phase and network timing trace.
+- `qecs up`: provision an interactive ephemeral VM and register in local state.
+  - Options: `--preset`, `--name`, `--ttl`, `--dry-run`, `--telemetry`.
+- `qecs shell [VM_ID]`: open an SSH shell (or remote VNC console fallback) into an active VM.
+
+### Inspection & Management
+- `qecs ls`: list tracked VMs with status, IPs, and remaining TTL. Add `--json` for machine-readable output.
+- `qecs info [VM_ID]`: display full metadata for a VM including VPC, subnet, AZ, and console URL.
+- `qecs logs [VM_ID]`: stream cloud-init initialization logs or background job output (`--follow`).
+- `qecs wait [VM_ID]`: block until a detached background job finishes and optionally retrieve output.
+- `qecs kill [VM_ID]`: delete an active VM and release cloud resources. Use `--all` to terminate all tracked VMs.
+- `qecs gc`: synchronize state with the cloud, detect externally deleted VMs, and purge expired instances.
+
+### Setup & Acceleration
+- `qecs setup`: interactive credential resolution check and config generation.
+- `qecs presets`: display available presets and active region.
+- `qecs image build`: bake a private IMS image with preinstalled toolchains and GPU drivers for accelerated cold starts.
+
+## Configuration & Environment
+
+Configuration is stored in `~/.config/qecs/config.toml`. Key settings include default region, presets, volume types, and SSH preferences.
+
+### Environment Variables
+
+All qecs settings follow the `QECS_<NAME>` convention:
+
+| Variable | Fallback Alias | Description |
+|---|---|---|
+| `QECS_AK` | `HUAWEICLOUD_SDK_AK`, `HWC_AK` | Access key |
+| `QECS_SK` | `HUAWEICLOUD_SDK_SK`, `HWC_SK` | Secret key |
+| `QECS_SECURITY_TOKEN` | `HWC_SECURITY_TOKEN` | STS session token |
+| `QECS_REGION` | - | Region override (precedence below `--region`, above config) |
+| `QECS_PROFILE` | - | Configuration profile selector |
+| `QECS_TELEMETRY` | - | Set to `1` to enable JSONL telemetry traces |
+
+### Telemetry Tracing
+
+When running with `--telemetry` (or `QECS_TELEMETRY=1`), qecs writes structured JSONL traces to `~/.local/state/qecs/traces/`. Traces record:
+- Total workflow wall time and metadata (preset, flavor, region, credential source).
+- Millisecond-accurate durations for each provisioning and execution phase.
+- Per-call HTTP latency, status code, request ID, and payload sizes for Huawei Cloud APIs.
+- Poll loop iteration counts and probe timings.
 
 ## Development
 
-    bash scripts/install-hooks.sh   # once: enables the auto version-bump hook
-    cargo test --all               # unit + e2e (built binary) + integration (mock HWC) + hook tests
-    cargo bench                     # criterion micro-benchmarks (signer, config, state)
+```bash
+# Run unit, mock integration, signer vectors, and CLI e2e tests
+cargo test --all
 
-`cargo run --release --example workflow_timing` (with `QECS_AK`, `QECS_SK`,
-`QECS_PROJECT_ID`, `QECS_REGION` set) times the real list-flavors call phase by
-phase. Every local phase combined is well under a millisecond; the network is
-essentially all of the wall time. Non-GPU presets are much faster from a nearby
-region (`sa-brazil-1`) than from `ap-southeast-3`.
+# Run linter and formatter check
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 
-Commits must follow Conventional Commits: the `post-commit` hook bumps the
-`Cargo.toml` version from the type (`feat:` minor, `feat!:`/`BREAKING CHANGE`
-major, everything else patch).
+# Compile benchmarks
+cargo bench --no-run
+```
+
+Commits must follow Conventional Commits (`feat:`, `fix:`, `docs:`, etc.). The repository post-commit hook automatically manages version bumps in `Cargo.toml`.
 
 ## License
 
