@@ -7,7 +7,7 @@
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -62,12 +62,101 @@ pub struct RunMeta {
 struct Inner {
     run_id: String,
     subcommand: String,
+    path: PathBuf,
     started: std::time::Instant,
     started_wall: DateTime<Utc>,
     seq: AtomicU64,
     writer: Mutex<Option<BufWriter<File>>>,
     meta: Mutex<RunMeta>,
     warned: AtomicBool,
+}
+
+/// Canonical phase names (stable identifiers per spec).
+pub const PHASES: &[&str] = &[
+    "creds-resolve",
+    "config-load",
+    "iam-project",
+    "ensure-vpc",
+    "ensure-subnet",
+    "ensure-sg",
+    "import-keypair",
+    "resolve-image",
+    "render-cloudinit",
+    "create-ecs",
+    "wait-create-job",
+    "wait-active",
+    "ssh-probe",
+    "workdir-pack",
+    "workdir-upload",
+    "gpu-wait",
+    "job-exec",
+    "output-download",
+    "image-create",
+    "destroy",
+];
+
+tokio::task_local! {
+    pub(crate) static PHASE: &'static str;
+}
+
+pub(crate) fn current_phase() -> Option<&'static str> {
+    PHASE.try_with(|p| *p).ok()
+}
+
+pub struct PhaseGuard {
+    tel: Telemetry,
+    name: &'static str,
+    start: std::time::Instant,
+    started_wall: DateTime<Utc>,
+    ok: bool,
+    err: Option<String>,
+}
+
+impl PhaseGuard {
+    pub fn fail(&mut self, e: &anyhow::Error) {
+        self.ok = false;
+        self.err = Some(truncate_err(&e.to_string(), 200));
+    }
+
+    pub fn ok(self) {
+        // Drop emits with ok = true
+    }
+}
+
+impl Drop for PhaseGuard {
+    fn drop(&mut self) {
+        let dur_ms = self.start.elapsed().as_millis() as u64;
+        let panicking = std::thread::panicking();
+        let ok = self.ok && !panicking;
+        let err = if panicking {
+            Some("panicked".to_string())
+        } else {
+            self.err.take()
+        };
+        let mut body = json!({
+            "name": self.name,
+            "started_ts": self.started_wall.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            "dur_ms": dur_ms,
+            "ok": ok,
+        });
+        if let Some(e) = err {
+            body["err"] = json!(e);
+        }
+        self.tel.emit("phase", body);
+    }
+}
+
+fn truncate_err(s: &str, max: usize) -> String {
+    let top_line = s.lines().next().unwrap_or(s);
+    if top_line.len() <= max {
+        top_line.to_string()
+    } else {
+        let mut end = max;
+        while !top_line.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        top_line[..end].to_string()
+    }
 }
 
 /// Clone-cheap recorder handle. Clones share one `Inner` (and one trace file);
@@ -120,7 +209,8 @@ impl Telemetry {
             subcommand,
             run_id
         );
-        let file = match File::create(dir.join(&name)) {
+        let path = dir.join(&name);
+        let file = match File::create(&path) {
             Ok(f) => f,
             Err(e) => {
                 log::warn!("telemetry: cannot open trace file {name}: {e}");
@@ -131,6 +221,7 @@ impl Telemetry {
             inner: Arc::new(Inner {
                 run_id,
                 subcommand: subcommand.to_string(),
+                path,
                 started: std::time::Instant::now(),
                 started_wall: now,
                 seq: AtomicU64::new(0),
@@ -139,6 +230,29 @@ impl Telemetry {
                 warned: AtomicBool::new(false),
             }),
         })
+    }
+
+    pub fn trace_path(&self) -> &Path {
+        &self.inner.path
+    }
+
+    pub fn phase(&self, name: &'static str) -> PhaseGuard {
+        PhaseGuard {
+            tel: self.clone(),
+            name,
+            start: std::time::Instant::now(),
+            started_wall: Utc::now(),
+            ok: true,
+            err: None,
+        }
+    }
+
+    pub async fn phase_async<F, T>(&self, name: &'static str, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let _g = self.phase(name);
+        PHASE.scope(name, fut).await
     }
 
     fn emit(&self, kind: &str, body: Value) {
@@ -240,6 +354,10 @@ pub trait TelemetryExt {
     fn record_hwc(&self, ev: HwcCall);
     fn record_poll(&self, ev: PollEvent);
     fn set_meta(&self, f: impl FnOnce(&mut RunMeta));
+    fn phase(&self, name: &'static str) -> Option<PhaseGuard>;
+    fn phase_async<F, T>(&self, name: &'static str, fut: F) -> impl std::future::Future<Output = T>
+    where
+        F: std::future::Future<Output = T>;
 }
 
 impl TelemetryExt for Option<Telemetry> {
@@ -258,11 +376,81 @@ impl TelemetryExt for Option<Telemetry> {
             t.set_meta(f);
         }
     }
+    fn phase(&self, name: &'static str) -> Option<PhaseGuard> {
+        self.as_ref().map(|t| t.phase(name))
+    }
+    async fn phase_async<F, T>(&self, name: &'static str, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        match self {
+            Some(t) => t.phase_async(name, fut).await,
+            None => fut.await,
+        }
+    }
+}
+
+impl TelemetryExt for Option<&Telemetry> {
+    fn record_hwc(&self, ev: HwcCall) {
+        if let Some(t) = self {
+            t.record_hwc(ev);
+        }
+    }
+    fn record_poll(&self, ev: PollEvent) {
+        if let Some(t) = self {
+            t.record_poll(ev);
+        }
+    }
+    fn set_meta(&self, f: impl FnOnce(&mut RunMeta)) {
+        if let Some(t) = self {
+            t.set_meta(f);
+        }
+    }
+    fn phase(&self, name: &'static str) -> Option<PhaseGuard> {
+        self.map(|t| t.phase(name))
+    }
+    async fn phase_async<F, T>(&self, name: &'static str, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        match self {
+            Some(t) => t.phase_async(name, fut).await,
+            None => fut.await,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phase_guard_records_duration_and_emits_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = env_lock();
+        let _e = EnvScope::new(tmp.path());
+
+        let t = Telemetry::init(true, "run").unwrap();
+        {
+            let _guard = t.phase("ensure-vpc");
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        t.finish(0);
+
+        let file = single_trace(tmp.path());
+        let lines: Vec<String> = std::fs::read_to_string(file)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+        assert_eq!(lines.len(), 2);
+        let l0: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(l0["kind"], "phase");
+        assert_eq!(l0["name"], "ensure-vpc");
+        assert!(l0["dur_ms"].as_u64().unwrap() >= 15);
+        assert_eq!(l0["ok"], true);
+        assert!(l0["started_ts"].is_string());
+    }
 
     #[test]
     fn event_roundtrips_to_jsonl() {
@@ -409,6 +597,102 @@ mod tests {
             .filter(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["kind"] == "run")
             .count();
         assert_eq!(runs, 1, "exactly one run line");
+    }
+
+    #[test]
+    fn phase_guard_emits_with_ok_false_on_unwind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = env_lock();
+        let _e = EnvScope::new(tmp.path());
+
+        let t = Telemetry::init(true, "run").unwrap();
+        let t_clone = t.clone();
+        let handle = std::thread::spawn(move || {
+            let _guard = t_clone.phase("unwind-test");
+            panic!("deliberate panic for unwind test");
+        });
+        let _ = handle.join();
+        t.finish(0);
+
+        let file = single_trace(tmp.path());
+        let body = std::fs::read_to_string(file).unwrap();
+        let l0: serde_json::Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+        assert_eq!(l0["kind"], "phase");
+        assert_eq!(l0["name"], "unwind-test");
+        assert_eq!(l0["ok"], false);
+        assert_eq!(l0["err"], "panicked");
+    }
+
+    #[test]
+    fn phase_guard_fail_sets_err() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = env_lock();
+        let _e = EnvScope::new(tmp.path());
+
+        let t = Telemetry::init(true, "run").unwrap();
+        {
+            let mut guard = t.phase("fail-test");
+            guard.fail(&anyhow::anyhow!("boom\nsecond line"));
+        }
+        t.finish(0);
+
+        let file = single_trace(tmp.path());
+        let body = std::fs::read_to_string(file).unwrap();
+        let l0: serde_json::Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+        assert_eq!(l0["kind"], "phase");
+        assert_eq!(l0["name"], "fail-test");
+        assert_eq!(l0["ok"], false);
+        assert_eq!(l0["err"], "boom");
+    }
+
+    #[tokio::test]
+    async fn phase_async_sets_task_local() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = {
+            let _g = env_lock();
+            let _e = EnvScope::new(tmp.path());
+            Telemetry::init(true, "run").unwrap()
+        };
+
+        assert_eq!(current_phase(), None);
+        let inside = t.phase_async("test-phase", async { current_phase() }).await;
+        assert_eq!(inside, Some("test-phase"));
+        assert_eq!(current_phase(), None);
+    }
+
+    #[tokio::test]
+    async fn option_phase_noop() {
+        let t: Option<Telemetry> = None;
+        assert!(t.phase("x").is_none());
+        let val = t.phase_async("x", async { 42 }).await;
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn canonical_phases_match_spec() {
+        let expected = &[
+            "creds-resolve",
+            "config-load",
+            "iam-project",
+            "ensure-vpc",
+            "ensure-subnet",
+            "ensure-sg",
+            "import-keypair",
+            "resolve-image",
+            "render-cloudinit",
+            "create-ecs",
+            "wait-create-job",
+            "wait-active",
+            "ssh-probe",
+            "workdir-pack",
+            "workdir-upload",
+            "gpu-wait",
+            "job-exec",
+            "output-download",
+            "image-create",
+            "destroy",
+        ];
+        assert_eq!(PHASES, expected);
     }
 
     // --- test helpers -----------------------------------------------------
