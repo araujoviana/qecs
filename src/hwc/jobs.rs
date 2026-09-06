@@ -8,6 +8,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JobResult {
     pub server_ids: Vec<String>,
+    pub image_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -49,6 +50,8 @@ pub(crate) struct SubJob {
 pub(crate) struct SubJobEntities {
     #[serde(default)]
     pub(crate) server_id: Option<String>,
+    #[serde(default)]
+    pub(crate) image_id: Option<String>,
 }
 
 /// Build the ECS-host jobs endpoint URL (mirrors `iam::projects_url`).
@@ -62,13 +65,20 @@ pub(crate) fn job_url(region: &str, project_id: &str, job_id: &str) -> String {
 pub(crate) fn job_outcome(resp: JobResp) -> Poll<anyhow::Result<JobResult>> {
     match resp.status {
         JobStatus::Success => {
-            let server_ids = resp
-                .entities
-                .sub_jobs
-                .into_iter()
-                .filter_map(|sj| sj.entities.server_id)
-                .collect();
-            Poll::Ready(Ok(JobResult { server_ids }))
+            let mut server_ids = Vec::new();
+            let mut image_ids = Vec::new();
+            for sj in resp.entities.sub_jobs {
+                if let Some(sid) = sj.entities.server_id {
+                    server_ids.push(sid);
+                }
+                if let Some(iid) = sj.entities.image_id {
+                    image_ids.push(iid);
+                }
+            }
+            Poll::Ready(Ok(JobResult {
+                server_ids,
+                image_ids,
+            }))
         }
         JobStatus::Fail => {
             let mut msg = resp.fail_reason.unwrap_or_else(|| "job failed".to_string());

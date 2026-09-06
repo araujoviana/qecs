@@ -50,6 +50,14 @@ pub fn render_cloudinit(
       echo "INSTALLING" > /run/qecs/gpu.status
       echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] Initializing GPU driver setup..." | tee -a "$LOG"
 
+      # 0. Fast-path: Check if pre-baked GPU drivers are already operational
+      if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >> "$LOG" 2>&1; then
+          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] Pre-baked GPU drivers detected and functional." | tee -a "$LOG"
+          touch /run/qecs/gpu.ready
+          echo "READY" > /run/qecs/gpu.status
+          exit 0
+      fi
+
       # 1. Blacklist nouveau if loaded
       if lsmod | grep -q nouveau; then
           echo "blacklist nouveau" > /etc/modprobe.d/blacklist-nouveau.conf
@@ -60,7 +68,7 @@ pub fn render_cloudinit(
       export DEBIAN_FRONTEND=noninteractive
 
       # 2. Wait for package locks if background updates are running
-      for i in $(seq 1 30); do
+      for _ in $(seq 1 30); do
           if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
               break
           fi
@@ -72,7 +80,7 @@ pub fn render_cloudinit(
       echo "[qecs-gpu] Installing kernel headers and dependencies..." >> "$LOG"
       apt-get update >> "$LOG" 2>&1 || true
       apt-get install -y --no-install-recommends \
-          linux-headers-$(uname -r) \
+          linux-headers-"$(uname -r)" \
           build-essential \
           dkms \
           curl \
@@ -331,5 +339,56 @@ mod tests {
         assert!(rendered.contains("/run/qecs/gpu.ready"));
         assert!(rendered.contains("/run/qecs/gpu.failed"));
         assert!(rendered.contains("nvidia-smi"));
+    }
+
+    #[test]
+    fn test_cloudinit_scripts_pass_bash_syntax_check() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA qecs";
+        let rendered = render_cloudinit(key, 7200, 1200, true);
+
+        let mut pos = 0;
+        let mut script_count = 0;
+        while let Some(start) = rendered[pos..].find("#!/bin/bash") {
+            let abs_start = pos + start;
+            let end = rendered[abs_start..]
+                .find("\n  - path:")
+                .unwrap_or(rendered[abs_start..].len());
+            let script_raw = &rendered[abs_start..abs_start + end];
+            let script: String = script_raw
+                .lines()
+                .map(|l| l.trim_start())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let mut child = Command::new("bash")
+                .arg("-n")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("failed to execute bash -n");
+
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(script.as_bytes()).unwrap();
+            }
+
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "bash -n failed on script:\n{script}\nstderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            script_count += 1;
+            pos = abs_start + end;
+        }
+
+        assert_eq!(
+            script_count, 2,
+            "should validate both guard and gpu scripts"
+        );
     }
 }

@@ -27,6 +27,7 @@ pub struct ProvisionOptions {
     pub name: Option<String>,
     pub ttl: Option<String>,
     pub dry_run: bool,
+    pub no_baked_image: bool,
 }
 
 /// Parse a human duration string (e.g. "2h", "30m", "120s", or raw minutes).
@@ -168,7 +169,13 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
     };
 
     let keypair_fut = keypair::import_keypair(&client, &region, &project.id, "qecs", &public_key);
-    let image_fut = images::resolve_image(&client, &region, Platform::Ubuntu);
+    let image_fut = images::resolve_baked_or_gold_image(
+        &client,
+        &region,
+        resolved.needs_gpu,
+        Platform::Ubuntu,
+        !opts.no_baked_image,
+    );
 
     let (subnet, sg, _kp, img) = tokio::try_join!(subnet_fut, sg_fut, keypair_fut, image_fut)?;
 

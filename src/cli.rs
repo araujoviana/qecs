@@ -56,6 +56,8 @@ pub enum Commands {
     Setup,
     /// Show presets and their resolved flavors.
     Presets,
+    /// Manage and build pre-baked IMS images for accelerated cold starts.
+    Image(ImageArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -75,6 +77,9 @@ pub struct RunArgs {
     pub output: Option<PathBuf>,
     #[arg(long)]
     pub dry_run: bool,
+    /// Bypass pre-baked private images and use a fresh base gold image.
+    #[arg(long)]
+    pub no_baked_image: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -87,6 +92,9 @@ pub struct UpArgs {
     pub ttl: Option<String>,
     #[arg(long)]
     pub dry_run: bool,
+    /// Bypass pre-baked private images and use a fresh base gold image.
+    #[arg(long)]
+    pub no_baked_image: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -119,6 +127,41 @@ pub struct KillArgs {
     pub all: bool,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct ImageArgs {
+    #[command(subcommand)]
+    pub action: ImageAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ImageAction {
+    /// List active private images.
+    Ls,
+    /// Build a pre-baked GPU image from an ephemeral instance.
+    Build(ImageBuildArgs),
+    /// Delete a private image by ID.
+    Delete(ImageDeleteArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ImageBuildArgs {
+    /// Name for the new baked image (defaults to qecs-gpu-YYYYMMDD-HHMM).
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Description for the baked image.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Keep the builder VM alive after image creation.
+    #[arg(long)]
+    pub keep: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ImageDeleteArgs {
+    /// Image ID to delete.
+    pub id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +174,49 @@ mod tests {
             Commands::Run(a) => {
                 assert_eq!(a.path.unwrap().to_str().unwrap(), "job.py");
                 assert_eq!(a.preset.as_deref(), Some("gpu"));
+                assert!(!a.no_baked_image);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn parses_run_with_no_baked_image() {
+        let cli = Cli::try_parse_from(["qecs", "run", "--no-baked-image"]).unwrap();
+        match cli.command {
+            Commands::Run(a) => assert!(a.no_baked_image),
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn parses_image_subcommands() {
+        let cli = Cli::try_parse_from(["qecs", "image", "ls"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Image(ImageArgs {
+                action: ImageAction::Ls
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["qecs", "image", "build", "--name", "my-image", "--keep"])
+            .unwrap();
+        match cli.command {
+            Commands::Image(ImageArgs {
+                action: ImageAction::Build(b),
+            }) => {
+                assert_eq!(b.name.as_deref(), Some("my-image"));
+                assert!(b.keep);
+            }
+            _ => panic!("wrong command"),
+        }
+
+        let cli = Cli::try_parse_from(["qecs", "image", "delete", "img-123"]).unwrap();
+        match cli.command {
+            Commands::Image(ImageArgs {
+                action: ImageAction::Delete(d),
+            }) => {
+                assert_eq!(d.id, "img-123");
             }
             _ => panic!("wrong command"),
         }

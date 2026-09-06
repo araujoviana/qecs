@@ -66,5 +66,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let ctx = qecs::ctx::Ctx::load(&cli)?;
             qecs::commands::wait::cmd_wait(&ctx, args.clone()).await
         }
+        Commands::Image(ref args) => {
+            let ctx = qecs::ctx::Ctx::load(&cli)?;
+            qecs::commands::image::cmd_image(&ctx, args.clone(), cli.global.json).await
+        }
     }
 }

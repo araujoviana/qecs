@@ -171,3 +171,19 @@ fn logs_without_active_vms_reports_error() {
         .failure()
         .code(1);
 }
+
+#[test]
+fn image_help_exits_zero() {
+    qecs()
+        .args(["image", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Manage and build pre-baked IMS images",
+        ));
+}
+
+#[test]
+fn image_delete_without_id_is_usage_error() {
+    qecs().args(["image", "delete"]).assert().failure().code(2);
+}

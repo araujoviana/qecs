@@ -48,6 +48,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         name: None,
         ttl: args.ttl.clone(),
         dry_run: false,
+        no_baked_image: args.no_baked_image,
     };
 
     let vm = provision::provision_vm(ctx, &opts)
@@ -237,7 +238,7 @@ async fn wait_for_ssh_ready(ip: &str, timeout: Duration) -> anyhow::Result<u16> 
     anyhow::bail!("timed out waiting for SSH to become ready on {ip}")
 }
 
-async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Result<()> {
+pub async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Result<()> {
     let region = ctx.region();
     let client = ctx.signed();
     let project = iam::discover_project(&client, &region).await?;
@@ -257,7 +258,7 @@ async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Result<()
     Ok(())
 }
 
-async fn wait_for_gpu_ready(
+pub async fn wait_for_gpu_ready(
     ip: &str,
     port: u16,
     key_path: &Path,

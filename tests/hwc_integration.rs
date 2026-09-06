@@ -245,3 +245,55 @@ async fn empty_success_body_is_handled() {
         .unwrap();
     assert_eq!(unit, ());
 }
+
+#[tokio::test]
+async fn ims_create_image_and_list_private_deserializes() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v2/cloudimages/action"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "job_id": "job-image-123"
+        })))
+        .mount(&server)
+        .await;
+
+    let action_url = format!("{}/v2/cloudimages/action", server.uri());
+    let body = serde_json::json!({
+        "name": "qecs-gpu-test",
+        "instance_id": "srv-1"
+    });
+    let resp: serde_json::Value = client()
+        .send_json(reqwest::Method::POST, &action_url, Some(&body))
+        .await
+        .unwrap();
+    assert_eq!(resp["job_id"], "job-image-123");
+
+    Mock::given(method("GET"))
+        .and(path("/v2/cloudimages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "images": [
+                {
+                    "id": "img-baked-1",
+                    "name": "qecs-gpu-20260906-1200",
+                    "__os_version": "Ubuntu 22.04",
+                    "min_disk": 40,
+                    "status": "active",
+                    "__imagetype": "private",
+                    "created_at": "2026-09-06T12:00:00Z"
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let list_url = format!(
+        "{}/v2/cloudimages?__imagetype=private&status=active&limit=100",
+        server.uri()
+    );
+    let got: serde_json::Value = client()
+        .send_json(reqwest::Method::GET, &list_url, None)
+        .await
+        .unwrap();
+    assert_eq!(got["images"][0]["name"], "qecs-gpu-20260906-1200");
+}

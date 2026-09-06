@@ -11,6 +11,7 @@ pub async fn cmd_up(ctx: &Ctx, args: UpArgs) -> anyhow::Result<()> {
         name: args.name,
         ttl: args.ttl,
         dry_run: args.dry_run,
+        no_baked_image: args.no_baked_image,
     };
 
     let pb = crate::ui::spinner("Provisioning VM...");
