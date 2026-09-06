@@ -77,6 +77,7 @@ pub(crate) fn job_outcome(resp: JobResp) -> Poll<anyhow::Result<JobResult>> {
                 .sub_jobs
                 .first()
                 .and_then(|sj| sj.fail_reason.as_deref())
+                // Avoid repeating the sub-job reason if it's already in the top-level message
                 && !msg.contains(sub)
             {
                 msg = format!("{msg}: {sub}");
@@ -119,7 +120,10 @@ mod tests {
     #[test]
     fn running_job_is_pending() {
         let j = r#"{"status":"RUNNING","job_id":"j","entities":{"sub_jobs":[]}}"#;
-        matches!(job_outcome(serde_json::from_str(j).unwrap()), Poll::Pending);
+        assert!(matches!(
+            job_outcome(serde_json::from_str(j).unwrap()),
+            Poll::Pending
+        ));
     }
 
     #[test]
@@ -145,7 +149,10 @@ mod tests {
     #[test]
     fn missing_sub_jobs_field_is_pending_not_panic() {
         let j = r#"{"status":"INIT","job_id":"j"}"#;
-        matches!(job_outcome(serde_json::from_str(j).unwrap()), Poll::Pending);
+        assert!(matches!(
+            job_outcome(serde_json::from_str(j).unwrap()),
+            Poll::Pending
+        ));
     }
 
     #[test]
