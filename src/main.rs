@@ -50,7 +50,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let ctx = qecs::ctx::Ctx::load(&cli)?;
             qecs::commands::gc::cmd_gc(&ctx, cli.global.json).await
         }
-        Commands::Run(_) => todo_stub("run"),
+        Commands::Run(ref args) => {
+            let ctx = qecs::ctx::Ctx::load(&cli)?;
+            qecs::commands::run::cmd_run(&ctx, args.clone()).await
+        }
         Commands::Shell(ref args) => {
             let ctx = qecs::ctx::Ctx::load(&cli)?;
             qecs::commands::shell::cmd_shell(&ctx, args.clone()).await
@@ -59,10 +62,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let ctx = qecs::ctx::Ctx::load(&cli)?;
             qecs::commands::logs::cmd_logs(&ctx, args.clone()).await
         }
-        Commands::Wait(_) => todo_stub("wait"),
+        Commands::Wait(ref args) => {
+            let ctx = qecs::ctx::Ctx::load(&cli)?;
+            qecs::commands::wait::cmd_wait(&ctx, args.clone()).await
+        }
     }
-}
-
-fn todo_stub(name: &str) -> anyhow::Result<()> {
-    anyhow::bail!("`qecs {name}` is not implemented yet")
 }

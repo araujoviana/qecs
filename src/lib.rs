@@ -12,5 +12,6 @@ pub mod hwc;
 pub mod keys;
 pub mod presets;
 pub mod provision;
+pub mod run;
 pub mod state;
 pub mod ui;

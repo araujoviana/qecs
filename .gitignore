@@ -4,6 +4,8 @@
 .claude/
 docs/superpowers/
 .qecs/
+AGENTS.md
+GEMINI.md
 
 # secrets / local state
 .env

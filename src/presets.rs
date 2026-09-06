@@ -1,9 +1,11 @@
 //! Presets map a friendly name to a concrete flavor + disk. Config overrides all.
 use crate::config::Config;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Preset {
     Normal,
     Ram,
@@ -22,6 +24,16 @@ impl Preset {
     ];
     pub fn needs_gpu(self) -> bool {
         matches!(self, Preset::Gpu | Preset::Beefy)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Preset::Normal => "normal",
+            Preset::Ram => "ram",
+            Preset::Compute => "compute",
+            Preset::Gpu => "gpu",
+            Preset::Beefy => "beefy",
+        }
     }
 }
 

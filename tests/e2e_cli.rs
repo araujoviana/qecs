@@ -90,13 +90,32 @@ fn config_file_flavor_override_is_reflected() {
 }
 
 #[test]
-fn unimplemented_subcommand_fails_with_a_clear_message() {
+fn wait_without_active_vms_reports_error() {
+    let dir = tempfile::tempdir().unwrap();
     qecs()
         .args(["wait", "job-1"])
+        .env("XDG_STATE_HOME", dir.path())
+        .env("QECS_AK", "mock")
+        .env("QECS_SK", "mock")
         .assert()
         .failure()
-        .code(1)
-        .stderr(predicate::str::contains("not implemented yet"));
+        .code(1);
+}
+
+#[test]
+fn run_dry_run_displays_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.py"), "print('hello')\n").unwrap();
+
+    qecs()
+        .args(["run", dir.path().to_str().unwrap(), "--dry-run"])
+        .env("QECS_AK", "mock")
+        .env("QECS_SK", "mock")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("=== qecs run Dry-Run Plan ==="))
+        .stdout(predicate::str::contains("python-bare"))
+        .stdout(predicate::str::contains("python3 main.py"));
 }
 
 #[test]
