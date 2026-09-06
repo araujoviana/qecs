@@ -29,7 +29,7 @@ async fn run(cli: Cli) -> i32 {
     let trace_path = tel.as_ref().map(|t| t.trace_path().to_path_buf());
 
     let result = match config_res {
-        Ok(ref cfg) => run_command(&cli, cfg).await,
+        Ok(ref cfg) => run_command(&cli, cfg, tel.clone()).await,
         Err(e) => Err(e),
     };
 
@@ -57,7 +57,11 @@ async fn run(cli: Cli) -> i32 {
     code
 }
 
-async fn run_command(cli: &Cli, cfg: &config::Config) -> anyhow::Result<()> {
+async fn run_command(
+    cli: &Cli,
+    cfg: &config::Config,
+    tel: Option<qecs::telemetry::Telemetry>,
+) -> anyhow::Result<()> {
     match cli.command {
         Commands::Presets => {
             let mut cfg = cfg.clone();
@@ -67,44 +71,44 @@ async fn run_command(cli: &Cli, cfg: &config::Config) -> anyhow::Result<()> {
             presets::cmd_presets(&cfg, cli.global.json).await
         }
         Commands::Setup => {
-            let ctx = qecs::ctx::Ctx::load(cli)?;
+            let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::setup::cmd_setup(&ctx).await
         }
         Commands::Up(ref args) => {
-            let ctx = qecs::ctx::Ctx::load(cli)?;
+            let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::up::cmd_up(&ctx, args.clone()).await
         }
         Commands::Ls => qecs::commands::ls::cmd_ls(cli.global.json).await,
         Commands::Info(ref args) => {
-            let ctx = qecs::ctx::Ctx::load(cli)?;
+            let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::info::cmd_info(&ctx, args.clone()).await
         }
         Commands::Kill(ref args) => {
-            let ctx = qecs::ctx::Ctx::load(cli)?;
+            let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::kill::cmd_kill(&ctx, args.clone()).await
         }
         Commands::Gc => {
-            let ctx = qecs::ctx::Ctx::load(cli)?;
+            let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::gc::cmd_gc(&ctx, cli.global.json).await
         }
         Commands::Run(ref args) => {
-            let ctx = qecs::ctx::Ctx::load(cli)?;
+            let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::run::cmd_run(&ctx, args.clone()).await
         }
         Commands::Shell(ref args) => {
-            let ctx = qecs::ctx::Ctx::load(cli)?;
+            let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::shell::cmd_shell(&ctx, args.clone()).await
         }
         Commands::Logs(ref args) => {
-            let ctx = qecs::ctx::Ctx::load(cli)?;
+            let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::logs::cmd_logs(&ctx, args.clone()).await
         }
         Commands::Wait(ref args) => {
-            let ctx = qecs::ctx::Ctx::load(cli)?;
+            let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::wait::cmd_wait(&ctx, args.clone()).await
         }
         Commands::Image(ref args) => {
-            let ctx = qecs::ctx::Ctx::load(cli)?;
+            let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::image::cmd_image(&ctx, args.clone(), cli.global.json).await
         }
     }

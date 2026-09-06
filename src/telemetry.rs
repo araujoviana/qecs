@@ -636,6 +636,27 @@ mod tests {
     }
 
     #[test]
+    fn set_meta_survives_to_run_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = env_lock();
+        let _e = EnvScope::new(tmp.path());
+
+        let t = Telemetry::init(true, "run").unwrap();
+        t.set_meta(|m| m.region = Some("ap-southeast-3".into()));
+        t.finish(0);
+
+        let file = single_trace(tmp.path());
+        let body = std::fs::read_to_string(file).unwrap();
+        let run_line: serde_json::Value = serde_json::from_str(
+            body.lines()
+                .find(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["kind"] == "run")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(run_line["region"], "ap-southeast-3");
+    }
+
+    #[test]
     fn resolve_enabled_precedence() {
         assert!(resolve_enabled(true, Some("0"), false));
         assert!(resolve_enabled(false, Some("1"), false));

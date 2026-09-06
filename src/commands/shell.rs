@@ -160,6 +160,7 @@ mod tests {
             creds,
             http: reqwest::Client::new(),
             global,
+            telemetry: None,
         }
     }
 

@@ -1,19 +1,19 @@
-//! One assembled context per invocation: config + creds + a shared HTTP client.
 use crate::cli::{Cli, GlobalArgs};
-use crate::config::{self, Config};
+use crate::config::Config;
 use crate::creds::{self, CredInput, Credentials};
 use crate::hwc::client::SignedClient;
+use crate::telemetry::Telemetry;
 
 pub struct Ctx {
     pub config: Config,
     pub creds: Credentials,
     pub http: reqwest::Client,
     pub global: GlobalArgs,
+    pub telemetry: Option<Telemetry>,
 }
 
 impl Ctx {
-    pub fn load(cli: &Cli) -> anyhow::Result<Ctx> {
-        let config = config::load_config(None)?;
+    pub fn load(cli: &Cli, config: Config, telemetry: Option<Telemetry>) -> anyhow::Result<Ctx> {
         let allow_prompt = !cli.global.json && !cli.global.quiet;
         let creds = creds::resolve(CredInput {
             flag_ak: cli.global.ak.as_deref(),
@@ -30,6 +30,7 @@ impl Ctx {
             creds,
             http,
             global: cli.global.clone(),
+            telemetry,
         })
     }
 

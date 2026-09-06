@@ -20,6 +20,7 @@ use crate::hwc::wait::PollConfig;
 use crate::keys;
 use crate::presets::{self, Preset};
 use crate::state::{StateStore, VmRecord};
+use crate::telemetry::TelemetryExt;
 
 #[derive(Debug, Clone, Default)]
 pub struct ProvisionOptions {
@@ -182,6 +183,14 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
 
     // 6. Name and TTL
     let preset_str = preset.to_string();
+    ctx.telemetry.set_meta(|m| {
+        m.region = Some(region.clone());
+        m.az = Some(az.clone());
+        m.preset = Some(preset_str.clone());
+        m.flavor = Some(resolved.flavor.clone());
+        m.image_id = Some(img.id.clone());
+        m.image_baked = Some(img.image_type == "private");
+    });
     let vm_name = opts
         .name
         .clone()
