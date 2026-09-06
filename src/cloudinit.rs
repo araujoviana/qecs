@@ -54,10 +54,8 @@ pub fn render_cloudinit(
       set -u
       LOG="/var/log/qecs-gpu-setup.log"
       mkdir -p /run/qecs
-      # Hold the job lock for the whole install so qecs-guard does not count the
-      # machine as idle and power it off during a 4-8 minute driver install.
-      touch /run/qecs/job.lock
-      trap 'rm -f /run/qecs/job.lock' EXIT
+      # gpu.status = INSTALLING is what qecs-guard watches to keep from powering
+      # the box off mid-install; no shared job.lock, so nothing to leak on exit.
       echo "INSTALLING" > /run/qecs/gpu.status
       echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] Initializing GPU driver setup..." | tee -a "$LOG"
 
@@ -221,6 +219,13 @@ write_files:
           exit 0
       fi
 
+      # 2b. GPU driver install in progress (can outlast a short idle_timeout).
+      if [ -f /run/qecs/gpu.status ] && [ "$(cat /run/qecs/gpu.status 2>/dev/null)" = "INSTALLING" ]; then
+          rm -f "$IDLE_STATE_FILE"
+          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-guard] GPU driver install in progress. Machine in use." >> "$LOG_FILE"
+          exit 0
+      fi
+
       # 3. Check active SSH sessions
       ACTIVE_SSH=$(ss -t state established '( sport = :22 or sport = :443 )' 2>/dev/null | grep -v "Recv-Q" | wc -l)
       if [ "$ACTIVE_SSH" -gt 0 ]; then
@@ -353,14 +358,21 @@ mod tests {
     }
 
     #[test]
-    fn gpu_setup_holds_the_job_lock_so_the_guard_does_not_poweroff_mid_install() {
+    fn guard_treats_an_in_progress_gpu_install_as_busy() {
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA qecs";
         let rendered = render_cloudinit(key, 7200, 300, true, None);
-        // the GPU install can outlast a short idle_timeout; it must look "busy"
-        let gpu_script_start = rendered.find("qecs-gpu-setup.sh").unwrap();
-        let gpu_section = &rendered[gpu_script_start..];
-        assert!(gpu_section.contains("touch /run/qecs/job.lock"));
-        assert!(gpu_section.contains("trap 'rm -f /run/qecs/job.lock' EXIT"));
+        // the GPU install can outlast a short idle_timeout; the guard must not
+        // idle-poweroff while gpu.status is INSTALLING (no shared job.lock).
+        let guard_start = rendered.find("qecs-guard.sh").unwrap();
+        let guard_end = rendered[guard_start..].find("qecs-guard.service").unwrap();
+        let guard = &rendered[guard_start..guard_start + guard_end];
+        assert!(guard.contains(r#"[ "$(cat /run/qecs/gpu.status 2>/dev/null)" = "INSTALLING" ]"#));
+
+        let gpu_start = rendered.find("qecs-gpu-setup.sh").unwrap();
+        let gpu = &rendered[gpu_start..];
+        assert!(gpu.contains(r#"echo "INSTALLING" > /run/qecs/gpu.status"#));
+        // no shared lock file that an EXIT trap would unconditionally delete
+        assert!(!gpu.contains("trap 'rm -f /run/qecs/job.lock' EXIT"));
     }
 
     #[test]

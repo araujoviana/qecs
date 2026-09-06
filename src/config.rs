@@ -26,7 +26,8 @@ pub struct RelayConfig {
     /// Relay server address (e.g. "bore.pub" or custom host)
     #[serde(default)]
     pub server: Option<String>,
-    /// Port on the relay server (e.g. 7835 for bore)
+    /// For `bore`: a free port on the relay server for it to publish (required;
+    /// not 7835, which is bore's control port). Unused by other relay types.
     #[serde(default)]
     pub port: Option<u16>,
     /// Secret authentication token if required by relay

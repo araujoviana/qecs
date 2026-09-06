@@ -25,9 +25,18 @@ impl Relay {
             "none" => Ok(Relay::None),
             "bore" => Ok(Relay::Bore {
                 server: c.server.clone().unwrap_or_else(|| "bore.pub".to_string()),
-                // bore assigns/uses a remote listen port on the relay server; the
-                // client's ProxyCommand dials that same port.
-                port: c.port.unwrap_or(7835),
+                // The remote listen port both sides must agree on. There is no
+                // safe default: 7835 is bore's own control port, and letting the
+                // server pick leaves the client with nothing to dial.
+                // The remote listen port both sides must agree on. There is no
+                // safe default: 7835 is bore's own control port, and letting the
+                // server pick leaves the client with nothing to dial.
+                port: c.port.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "[relay] type = \"bore\" requires an explicit `port` (a free port on the \
+                         relay server that `bore` will publish, e.g. port = 40022)"
+                    )
+                })?,
                 token: c.token.clone(),
             }),
             "custom" => {
@@ -172,6 +181,19 @@ mod tests {
         };
         let err = Relay::from_config(Some(&cfg)).unwrap_err().to_string();
         assert!(err.contains("cloudflare"));
+    }
+
+    #[test]
+    fn bore_relay_without_an_explicit_port_is_an_error() {
+        // 7835 is bore's control port; there is no port that works as a default.
+        let cfg = RelayConfig {
+            r#type: "bore".into(),
+            server: Some("bore.pub".into()),
+            port: None,
+            ..Default::default()
+        };
+        let err = Relay::from_config(Some(&cfg)).unwrap_err().to_string();
+        assert!(err.contains("port"));
     }
 
     #[test]

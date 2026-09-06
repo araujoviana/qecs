@@ -44,8 +44,11 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
 
     // Poll for remote job.exit file. A detached job cannot outlive its VM's TTL,
     // so bound the wait by the remaining TTL rather than a flat hour that would
-    // abandon a long training run.
-    let poll_cmd = "[ -f /home/ubuntu/job.exit ] && cat /home/ubuntu/job.exit";
+    // abandon a long training run. Refresh the job lock on every poll so the
+    // on-box guard never idle-powers-off in the gap between the job's own lock
+    // trap firing and this command pulling the artifacts.
+    let poll_cmd = "mkdir -p /run/qecs && touch /run/qecs/job.lock; \
+                    [ -f /home/ubuntu/job.exit ] && cat /home/ubuntu/job.exit";
     let start = Instant::now();
     let timeout = Duration::from_secs(crate::lifecycle::wait_deadline_secs(
         &vm.created_at,
@@ -80,7 +83,7 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
         }
 
         tokio::time::sleep(interval).await;
-        interval = (interval * 2).min(Duration::from_secs(30));
+        interval = (interval * 2).min(Duration::from_secs(10));
     };
 
     pb.finish_and_clear();
