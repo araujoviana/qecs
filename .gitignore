@@ -11,3 +11,6 @@ docs/superpowers/
 *.tfstate
 *.tfstate.*
 keys/
+
+# SDD scratch
+.superpowers/
