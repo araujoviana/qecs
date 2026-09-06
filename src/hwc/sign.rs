@@ -59,7 +59,10 @@ pub fn canonical_headers(headers: &[(String, String)]) -> (String, String) {
         .map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_string()))
         .collect();
     h.sort_by(|a, b| a.0.cmp(&b.0));
-    let canonical = h.iter().map(|(k, v)| format!("{k}:{v}\n")).collect::<String>();
+    let canonical = h
+        .iter()
+        .map(|(k, v)| format!("{k}:{v}\n"))
+        .collect::<String>();
     let signed = h
         .iter()
         .map(|(k, _)| k.clone())

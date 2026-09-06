@@ -29,7 +29,11 @@ pub fn resolve(input: CredInput) -> anyhow::Result<Credentials> {
     }
     for (a, s, t) in [
         ("QECS_AK", "QECS_SK", "HWC_SECURITY_TOKEN"),
-        ("HUAWEICLOUD_SDK_AK", "HUAWEICLOUD_SDK_SK", "HWC_SECURITY_TOKEN"),
+        (
+            "HUAWEICLOUD_SDK_AK",
+            "HUAWEICLOUD_SDK_SK",
+            "HWC_SECURITY_TOKEN",
+        ),
         ("HWC_AK", "HWC_SK", "HWC_SECURITY_TOKEN"),
     ] {
         if let Some(c) = from_env_pair(a, s, t) {
@@ -210,7 +214,11 @@ mod tests {
         let _g = lock();
         clear();
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".env.staging"), "HWC_AK=fileak\nHWC_SK=filesk\n").unwrap();
+        std::fs::write(
+            dir.path().join(".env.staging"),
+            "HWC_AK=fileak\nHWC_SK=filesk\n",
+        )
+        .unwrap();
         let cfg = Config {
             env_files: vec![dir.path().join(".env")],
             ..Config::default()

@@ -32,7 +32,7 @@ pub struct PresetTable {
     pub beefy: PresetCfg,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PresetCfg {
     pub flavor: String,
@@ -76,15 +76,6 @@ impl Default for PresetTable {
                 flavor: "p2s.8xlarge.8".into(),
                 disk_gb: 300,
             },
-        }
-    }
-}
-
-impl Default for PresetCfg {
-    fn default() -> Self {
-        PresetCfg {
-            flavor: String::new(),
-            disk_gb: 0,
         }
     }
 }
