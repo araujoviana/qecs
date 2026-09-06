@@ -15,4 +15,5 @@ pub mod presets;
 pub mod provision;
 pub mod run;
 pub mod state;
+pub mod telemetry;
 pub mod ui;
