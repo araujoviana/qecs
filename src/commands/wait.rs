@@ -42,10 +42,16 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
         args.job, vm.name
     ));
 
-    // Poll for remote job.exit file
+    // Poll for remote job.exit file. A detached job cannot outlive its VM's TTL,
+    // so bound the wait by the remaining TTL rather than a flat hour that would
+    // abandon a long training run.
     let poll_cmd = "[ -f /home/ubuntu/job.exit ] && cat /home/ubuntu/job.exit";
     let start = Instant::now();
-    let timeout = Duration::from_secs(3600); // 1 hour max wait
+    let timeout = Duration::from_secs(crate::lifecycle::wait_deadline_secs(
+        &vm.created_at,
+        vm.ttl_secs,
+    ));
+    let mut interval = Duration::from_secs(3);
 
     let exit_code = loop {
         let output =
@@ -65,10 +71,16 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
 
         if start.elapsed() > timeout {
             pb.finish_and_clear();
-            anyhow::bail!("timed out waiting for job to complete on `{}`", vm.name);
+            anyhow::bail!(
+                "timed out waiting for job on `{}` after {}s (VM TTL). Check `qecs logs {}`.",
+                vm.name,
+                timeout.as_secs(),
+                vm.name
+            );
         }
 
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(interval).await;
+        interval = (interval * 2).min(Duration::from_secs(30));
     };
 
     pb.finish_and_clear();

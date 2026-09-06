@@ -101,9 +101,16 @@ fn walk_and_pack<W: Write>(
             continue;
         }
 
+        // Skip symlinks: `path.is_file()` follows them, which would pack the
+        // contents of whatever they point at (e.g. a link to /etc/passwd or a
+        // path outside the workdir) under the link's own name.
+        if path.is_symlink() {
+            continue;
+        }
+
         if path.is_dir() {
             walk_and_pack(tar, root, &path, patterns)?;
-        } else if path.is_file() || path.is_symlink() {
+        } else if path.is_file() {
             let mut file = File::open(&path).context("opening file for tar")?;
             tar.append_file(rel_path, &mut file)
                 .with_context(|| format!("adding `{}` to tar", rel_path.display()))?;
@@ -259,6 +266,37 @@ mod tests {
         assert!(!entries.iter().any(|p| p == Path::new(".env")));
         assert!(!entries.iter().any(|p| p == Path::new("id_rsa.key")));
         assert!(!entries.iter().any(|p| p == Path::new("custom_ignore.txt")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlinks_are_not_followed_into_the_tarball() {
+        use std::os::unix::fs::symlink;
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret");
+        fs::write(&secret, "SECRET\n").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("real.txt"), "hi\n").unwrap();
+        // a symlink pointing outside the workdir must not smuggle its target in
+        symlink(&secret, root.join("link-to-secret")).unwrap();
+
+        let bytes = pack_directory(root).unwrap();
+        let decoder = GzDecoder::new(&bytes[..]);
+        let mut archive = Archive::new(decoder);
+        let names: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(names.iter().any(|n| n == "real.txt"));
+        assert!(
+            !names.iter().any(|n| n.contains("link-to-secret")),
+            "symlink leaked into archive: {names:?}"
+        );
     }
 
     #[test]

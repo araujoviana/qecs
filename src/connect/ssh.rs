@@ -10,13 +10,27 @@ pub fn build_ssh_args(
     key_path: &Path,
     proxy_command: Option<&str>,
 ) -> Vec<String> {
+    // Ephemeral VMs recycle elastic IPs, so trusting/recording host keys just
+    // produces spurious mismatch failures later; BatchMode keeps a failed key
+    // auth from blocking a non-interactive `qecs run` on a password prompt; the
+    // keepalives stop a long silent attached job from being dropped by NAT.
     let mut args = vec![
         "-i".to_string(),
         key_path.to_string_lossy().to_string(),
         "-p".to_string(),
         port.to_string(),
         "-o".to_string(),
-        "StrictHostKeyChecking=accept-new".to_string(),
+        "StrictHostKeyChecking=no".to_string(),
+        "-o".to_string(),
+        "UserKnownHostsFile=/dev/null".to_string(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "ConnectTimeout=10".to_string(),
+        "-o".to_string(),
+        "ServerAliveInterval=15".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=8".to_string(),
         "-o".to_string(),
         "IdentitiesOnly=yes".to_string(),
         "-o".to_string(),
@@ -84,8 +98,21 @@ mod tests {
         assert_eq!(args[1], "/home/user/.config/qecs/keys/id_qecs");
         assert_eq!(args[2], "-p");
         assert_eq!(args[3], "443");
-        assert!(args.contains(&"StrictHostKeyChecking=accept-new".to_string()));
         assert_eq!(args.last().unwrap(), "ubuntu@1.2.3.4");
+    }
+
+    #[test]
+    fn ssh_args_are_hardened_for_ephemeral_non_interactive_use() {
+        let key = PathBuf::from("/k");
+        let args = build_ssh_args("1.2.3.4", 22, &key, None).join(" ");
+        // never block a script on a password prompt
+        assert!(args.contains("BatchMode=yes"));
+        // ephemeral VMs recycle EIPs -> never write/trust ~/.ssh/known_hosts
+        assert!(args.contains("StrictHostKeyChecking=no"));
+        assert!(args.contains("UserKnownHostsFile=/dev/null"));
+        // don't hang forever on a black-holed port; keep long attached jobs alive
+        assert!(args.contains("ConnectTimeout="));
+        assert!(args.contains("ServerAliveInterval="));
     }
 
     #[test]

@@ -21,7 +21,9 @@ pub fn calculate_ttl(created_at_rfc3339: &str, ttl_secs: u64) -> TtlInfo {
     let now = chrono::Utc::now();
     let created = match chrono::DateTime::parse_from_rfc3339(created_at_rfc3339) {
         Ok(dt) => dt.with_timezone(&chrono::Utc),
-        Err(_) => now,
+        // Unparseable timestamp: assume the worst (expired) rather than the best
+        // (just created), so a VM with corrupt state still gets reconciled.
+        Err(_) => now - chrono::Duration::seconds(ttl_secs as i64 + 1),
     };
     let elapsed = (now - created).num_seconds();
     let remaining = (ttl_secs as i64) - elapsed;
@@ -45,6 +47,18 @@ pub fn calculate_ttl(created_at_rfc3339: &str, ttl_secs: u64) -> TtlInfo {
         is_expired,
         human_remaining,
     }
+}
+
+/// How long `qecs wait` should keep polling a detached job before giving up.
+///
+/// A job cannot outlive its VM (the on-box guard powers off at the hard TTL), so
+/// the deadline tracks the remaining TTL plus a small grace, with a floor so an
+/// already-expired-looking VM still gets a brief chance to report its exit code.
+pub fn wait_deadline_secs(created_at_rfc3339: &str, ttl_secs: u64) -> u64 {
+    const GRACE: i64 = 180;
+    const FLOOR: u64 = 300;
+    let remaining = calculate_ttl(created_at_rfc3339, ttl_secs).remaining_secs;
+    (remaining + GRACE).max(0) as u64 + FLOOR
 }
 
 /// Statistics returned by garbage collection / reconciliation.
@@ -131,6 +145,32 @@ mod tests {
 
         assert!(ttl.is_expired);
         assert!(ttl.remaining_secs < 0);
+        assert_eq!(ttl.human_remaining, "expired");
+    }
+
+    #[test]
+    fn wait_deadline_tracks_remaining_ttl_not_a_flat_hour() {
+        // fresh 4h VM -> wait can run for roughly the full 4h (+ grace + floor),
+        // well past the old hard-coded 3600s ceiling that abandoned long jobs.
+        let created = Utc::now().to_rfc3339();
+        let d = wait_deadline_secs(&created, 4 * 3600);
+        assert!(
+            d > 4 * 3600,
+            "deadline {d} should exceed 4h for a fresh 4h VM"
+        );
+
+        // near-expired VM -> short deadline, but never zero (floor lets it report)
+        let old = (Utc::now() - Duration::minutes(115)).to_rfc3339();
+        let d = wait_deadline_secs(&old, 7200);
+        assert!((300..1200).contains(&d), "near-expired deadline was {d}");
+    }
+
+    #[test]
+    fn unparseable_created_at_is_treated_as_expired_not_fresh() {
+        // A garbled timestamp must not make a possibly-old VM look brand new and
+        // immune to gc; surface it as expired so it gets reconciled.
+        let ttl = calculate_ttl("not-a-timestamp", 7200);
+        assert!(ttl.is_expired);
         assert_eq!(ttl.human_remaining, "expired");
     }
 

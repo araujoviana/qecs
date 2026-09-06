@@ -54,6 +54,10 @@ pub fn render_cloudinit(
       set -u
       LOG="/var/log/qecs-gpu-setup.log"
       mkdir -p /run/qecs
+      # Hold the job lock for the whole install so qecs-guard does not count the
+      # machine as idle and power it off during a 4-8 minute driver install.
+      touch /run/qecs/job.lock
+      trap 'rm -f /run/qecs/job.lock' EXIT
       echo "INSTALLING" > /run/qecs/gpu.status
       echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] Initializing GPU driver setup..." | tee -a "$LOG"
 
@@ -346,6 +350,17 @@ mod tests {
         assert!(rendered.contains("/run/qecs/gpu.ready"));
         assert!(rendered.contains("/run/qecs/gpu.failed"));
         assert!(rendered.contains("nvidia-smi"));
+    }
+
+    #[test]
+    fn gpu_setup_holds_the_job_lock_so_the_guard_does_not_poweroff_mid_install() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA qecs";
+        let rendered = render_cloudinit(key, 7200, 300, true, None);
+        // the GPU install can outlast a short idle_timeout; it must look "busy"
+        let gpu_script_start = rendered.find("qecs-gpu-setup.sh").unwrap();
+        let gpu_section = &rendered[gpu_script_start..];
+        assert!(gpu_section.contains("touch /run/qecs/job.lock"));
+        assert!(gpu_section.contains("trap 'rm -f /run/qecs/job.lock' EXIT"));
     }
 
     #[test]
