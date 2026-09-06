@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Auto-bump the Cargo [package] version from the conventional-commit type of the
+# commit that was just made, then fold the bump into that same commit (amend).
+#   <type>!: / any !: / "BREAKING CHANGE" in body -> major
+#   feat:                                         -> minor
+#   everything else / no prefix                   -> patch
+set -euo pipefail
+
+# Guard against the recursive post-commit triggered by our own amend.
+[ -n "${QECS_NO_BUMP:-}" ] && exit 0
+
+root="$(git rev-parse --show-toplevel)"
+manifest="$root/Cargo.toml"
+[ -f "$manifest" ] || exit 0
+
+msg="$(git -C "$root" log -1 --pretty=%B)"
+subject="$(printf '%s\n' "$msg" | head -n1)"
+
+level="patch"
+if printf '%s' "$msg" | grep -qE 'BREAKING CHANGE' \
+   || printf '%s' "$subject" | grep -qE '^[a-z]+(\([^)]*\))?!:'; then
+  level="major"
+elif printf '%s' "$subject" | grep -qE '^feat(\([^)]*\))?:'; then
+  level="minor"
+elif ! printf '%s' "$subject" | grep -qE '^[a-z]+(\([^)]*\))?:'; then
+  echo "post-commit: no conventional-commit prefix, patch bump" >&2
+fi
+
+cur="$(grep -m1 -E '^[[:space:]]*version[[:space:]]*=[[:space:]]*"' "$manifest" | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')"
+IFS='.' read -r MA MI PA <<< "$cur"
+case "$level" in
+  major) MA=$((MA + 1)); MI=0; PA=0 ;;
+  minor) MI=$((MI + 1)); PA=0 ;;
+  patch) PA=$((PA + 1)) ;;
+esac
+new="$MA.$MI.$PA"
+[ "$new" = "$cur" ] && exit 0
+
+awk -v new="$new" '
+  /^\[/ { inpkg = ($0 == "[package]") }
+  inpkg && !done && /^[[:space:]]*version[[:space:]]*=/ {
+    sub(/"[0-9]+\.[0-9]+\.[0-9]+"/, "\"" new "\""); done = 1
+  }
+  { print }
+' "$manifest" > "$manifest.tmp" && mv "$manifest.tmp" "$manifest"
+git -C "$root" add "$manifest"
+
+if [ -f "$root/Cargo.lock" ]; then
+  awk -v new="$new" '
+    /^\[\[package\]\]/ { inpkg = 0 }
+    /^name = "qecs"$/  { inpkg = 1 }
+    inpkg && /^version = / {
+      sub(/"[0-9]+\.[0-9]+\.[0-9]+"/, "\"" new "\""); inpkg = 0
+    }
+    { print }
+  ' "$root/Cargo.lock" > "$root/Cargo.lock.tmp" && mv "$root/Cargo.lock.tmp" "$root/Cargo.lock"
+  git -C "$root" add "$root/Cargo.lock"
+fi
+
+QECS_NO_BUMP=1 git -C "$root" commit --amend --no-edit --no-verify --quiet
+echo "post-commit: version $cur -> $new ($level)" >&2
