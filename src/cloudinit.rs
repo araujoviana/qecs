@@ -1,5 +1,6 @@
 //! Cloud-init rendering for ephemeral ECS instances.
-//! Configures sshd on 22 + 443 and authorizes the dedicated qecs key.
+//! Configures sshd on 22 + 443, authorizes dedicated qecs key,
+//! and installs autonomous `qecs-guard` daemon for hard TTL and idle shutdown.
 
 const B64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -26,8 +27,12 @@ pub fn base64_encode(input: &[u8]) -> String {
     out
 }
 
-/// Render the base `#cloud-config` user-data for Ubuntu/Debian instances.
-pub fn render_base_cloudinit(public_key: &str) -> String {
+/// Render the complete `#cloud-config` user-data for Ubuntu instances.
+/// Injects dual-port sshd, dedicated SSH authorized key, autonomous lifecycle guard,
+/// systemd timer, and hard TTL shutdown fallback.
+pub fn render_cloudinit(public_key: &str, ttl_secs: u64, idle_timeout_secs: u64) -> String {
+    let ttl_minutes = (ttl_secs / 60).max(1);
+
     format!(
         r#"#cloud-config
 users:
@@ -46,10 +51,106 @@ write_files:
       Port 22
       Port 443
 
+  - path: /usr/local/bin/qecs-guard.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -u
+      TTL_SECS={ttl_secs}
+      IDLE_TIMEOUT_SECS={idle_timeout_secs}
+      LOG_FILE="/var/log/qecs-spend.log"
+      LOCK_FILE="/run/qecs/job.lock"
+      IDLE_STATE_FILE="/run/qecs/idle_seconds"
+
+      mkdir -p /run/qecs
+
+      # 1. Check TTL expiration
+      UPTIME_SECS=$(awk '{{print int($1)}}' /proc/uptime 2>/dev/null || echo 0)
+      if [ "$UPTIME_SECS" -ge "$TTL_SECS" ]; then
+          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-guard] TTL reached (${{UPTIME_SECS}}s >= ${{TTL_SECS}}s). Powering off." | tee -a "$LOG_FILE"
+          poweroff
+          exit 0
+      fi
+
+      # 2. Check active job lock
+      if [ -f "$LOCK_FILE" ]; then
+          rm -f "$IDLE_STATE_FILE"
+          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-guard] Job lock active. Machine in use." >> "$LOG_FILE"
+          exit 0
+      fi
+
+      # 3. Check active SSH sessions
+      ACTIVE_SSH=$(ss -t state established '( sport = :22 or sport = :443 )' 2>/dev/null | grep -v "Recv-Q" | wc -l)
+      if [ "$ACTIVE_SSH" -gt 0 ]; then
+          rm -f "$IDLE_STATE_FILE"
+          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-guard] Active SSH sessions ($ACTIVE_SSH). Machine in use." >> "$LOG_FILE"
+          exit 0
+      fi
+
+      # 4. Check GPU utilization if nvidia-smi present
+      if command -v nvidia-smi >/dev/null 2>&1; then
+          GPU_UTIL=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -n 1 | tr -d ' %')
+          if [ -n "$GPU_UTIL" ] && [ "$GPU_UTIL" -ge 5 ]; then
+              rm -f "$IDLE_STATE_FILE"
+              echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-guard] GPU active (${{GPU_UTIL}}%). Machine in use." >> "$LOG_FILE"
+              exit 0
+          fi
+      fi
+
+      # 5. Machine is idle: track duration
+      CURRENT_IDLE=0
+      if [ -f "$IDLE_STATE_FILE" ]; then
+          CURRENT_IDLE=$(cat "$IDLE_STATE_FILE" 2>/dev/null || echo 0)
+      fi
+      CURRENT_IDLE=$((CURRENT_IDLE + 120))
+      echo "$CURRENT_IDLE" > "$IDLE_STATE_FILE"
+
+      UPTIME_HOURS=$(awk '{{printf "%.2f", $1/3600}}' /proc/uptime 2>/dev/null || echo "0.0")
+      echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-guard] Idle for ${{CURRENT_IDLE}}s (threshold: ${{IDLE_TIMEOUT_SECS}}s). Uptime: ${{UPTIME_HOURS}}h." >> "$LOG_FILE"
+
+      if [ "$CURRENT_IDLE" -ge "$IDLE_TIMEOUT_SECS" ]; then
+          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-guard] Idle timeout reached. Powering off." | tee -a "$LOG_FILE"
+          poweroff
+      fi
+
+  - path: /etc/systemd/system/qecs-guard.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=qecs autonomous lifecycle and budget guard
+      After=network.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/qecs-guard.sh
+
+  - path: /etc/systemd/system/qecs-guard.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Run qecs-guard every 2 minutes
+
+      [Timer]
+      OnBootSec=2min
+      OnUnitActiveSec=2min
+      AccuracySec=10s
+
+      [Install]
+      WantedBy=timers.target
+
 runcmd:
   - [systemctl, restart, ssh]
+  - [mkdir, -p, /run/qecs]
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, qecs-guard.timer]
+  - shutdown -h +{ttl_minutes} "qecs hard TTL guard"
 "#
     )
+}
+
+/// Backward-compatible baseline cloudinit helper.
+pub fn render_base_cloudinit(public_key: &str) -> String {
+    render_cloudinit(public_key, 7200, 1200)
 }
 
 #[cfg(test)]
@@ -66,12 +167,27 @@ mod tests {
     }
 
     #[test]
-    fn test_cloudinit_contains_key_and_ports() {
+    fn test_cloudinit_contains_guard_and_systemd_timer() {
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA qecs";
-        let rendered = render_base_cloudinit(key);
+        let rendered = render_cloudinit(key, 3600, 600);
+
         assert!(rendered.starts_with("#cloud-config"));
         assert!(rendered.contains(key));
         assert!(rendered.contains("Port 22"));
         assert!(rendered.contains("Port 443"));
+
+        // Guard script
+        assert!(rendered.contains("/usr/local/bin/qecs-guard.sh"));
+        assert!(rendered.contains("TTL_SECS=3600"));
+        assert!(rendered.contains("IDLE_TIMEOUT_SECS=600"));
+        assert!(rendered.contains("/run/qecs/job.lock"));
+
+        // Systemd files
+        assert!(rendered.contains("/etc/systemd/system/qecs-guard.service"));
+        assert!(rendered.contains("/etc/systemd/system/qecs-guard.timer"));
+        assert!(rendered.contains("qecs-guard.timer"));
+
+        // Hard fallback shutdown
+        assert!(rendered.contains("shutdown -h +60"));
     }
 }

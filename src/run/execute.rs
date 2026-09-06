@@ -11,6 +11,8 @@ use anyhow::Context;
 /// Build the composite remote script to execute in `remote_dir`.
 pub fn build_script(remote_dir: &str, setup_cmds: &[String], run_cmd: &str) -> String {
     let mut script = String::new();
+    script.push_str("mkdir -p /run/qecs && touch /run/qecs/job.lock\n");
+    script.push_str("trap 'rm -f /run/qecs/job.lock' EXIT\n");
     script.push_str(&format!("cd '{remote_dir}' || exit 1\n"));
 
     for cmd in setup_cmds {
@@ -72,7 +74,7 @@ pub fn execute_job_detached(
     run_cmd: &str,
 ) -> anyhow::Result<()> {
     let script = format!(
-        "cd '{remote_dir}' || exit 1\n{setup}\n{run_cmd}\necho $? > /home/ubuntu/job.exit\n",
+        "mkdir -p /run/qecs && touch /run/qecs/job.lock\ntrap 'rm -f /run/qecs/job.lock' EXIT\ncd '{remote_dir}' || exit 1\n{setup}\n{run_cmd}\necho $? > /home/ubuntu/job.exit\n",
         setup = setup_cmds.join("\n")
     );
 
@@ -122,7 +124,9 @@ mod tests {
         ];
         let script = build_script("/home/ubuntu/workspace", &setup, "python3 main.py");
 
-        assert!(script.starts_with("cd '/home/ubuntu/workspace' || exit 1\n"));
+        assert!(script.contains("mkdir -p /run/qecs && touch /run/qecs/job.lock\n"));
+        assert!(script.contains("trap 'rm -f /run/qecs/job.lock' EXIT\n"));
+        assert!(script.contains("cd '/home/ubuntu/workspace' || exit 1\n"));
         assert!(script.contains("pip install -r requirements.txt\n"));
         assert!(script.contains("export FOO=bar\n"));
         assert!(script.ends_with("python3 main.py\n"));

@@ -168,7 +168,10 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
         .to_string();
 
     // 7. Cloud-init user data
-    let user_data_raw = cloudinit::render_base_cloudinit(&public_key);
+    let idle_duration =
+        parse_duration(&ctx.config.idle_timeout).unwrap_or(Duration::from_secs(1200));
+    let user_data_raw =
+        cloudinit::render_cloudinit(&public_key, ttl_duration.as_secs(), idle_duration.as_secs());
     let user_data_b64 = cloudinit::base64_encode(user_data_raw.as_bytes());
 
     // 8. Assemble CreateServer spec

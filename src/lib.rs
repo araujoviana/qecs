@@ -10,6 +10,7 @@ pub mod ctx;
 pub mod error;
 pub mod hwc;
 pub mod keys;
+pub mod lifecycle;
 pub mod presets;
 pub mod provision;
 pub mod run;

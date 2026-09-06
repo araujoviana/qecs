@@ -1,6 +1,5 @@
 //! `qecs ls` command: list tracked VMs.
 use crate::state::StateStore;
-use chrono::{DateTime, Utc};
 use tabled::Tabled;
 
 #[derive(Tabled)]
@@ -20,23 +19,7 @@ struct LsRow {
 }
 
 pub fn format_ttl_remaining(created_at: &str, ttl_secs: u64) -> String {
-    if let Ok(created) = DateTime::parse_from_rfc3339(created_at) {
-        let elapsed = Utc::now().signed_duration_since(created.with_timezone(&Utc));
-        let remaining_secs = (ttl_secs as i64) - elapsed.num_seconds();
-        if remaining_secs <= 0 {
-            "expired".to_string()
-        } else {
-            let mins = remaining_secs / 60;
-            let hrs = mins / 60;
-            if hrs > 0 {
-                format!("{}h {}m", hrs, mins % 60)
-            } else {
-                format!("{}m", mins)
-            }
-        }
-    } else {
-        "-".to_string()
-    }
+    crate::lifecycle::calculate_ttl(created_at, ttl_secs).human_remaining
 }
 
 pub async fn cmd_ls(json: bool) -> anyhow::Result<()> {
@@ -74,6 +57,7 @@ pub async fn cmd_ls(json: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     #[test]
     fn formats_ttl_correctly() {
