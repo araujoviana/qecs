@@ -29,16 +29,31 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             presets::cmd_presets(&cfg, cli.global.json).await
         }
-        Commands::Setup => todo_stub("setup"),
+        Commands::Setup => {
+            let ctx = qecs::ctx::Ctx::load(&cli)?;
+            qecs::commands::setup::cmd_setup(&ctx).await
+        }
+        Commands::Up(ref args) => {
+            let ctx = qecs::ctx::Ctx::load(&cli)?;
+            qecs::commands::up::cmd_up(&ctx, args.clone()).await
+        }
+        Commands::Ls => qecs::commands::ls::cmd_ls(cli.global.json).await,
+        Commands::Info(ref args) => {
+            let ctx = qecs::ctx::Ctx::load(&cli)?;
+            qecs::commands::info::cmd_info(&ctx, args.clone()).await
+        }
+        Commands::Kill(ref args) => {
+            let ctx = qecs::ctx::Ctx::load(&cli)?;
+            qecs::commands::kill::cmd_kill(&ctx, args.clone()).await
+        }
+        Commands::Gc => {
+            let ctx = qecs::ctx::Ctx::load(&cli)?;
+            qecs::commands::gc::cmd_gc(&ctx, cli.global.json).await
+        }
         Commands::Run(_) => todo_stub("run"),
-        Commands::Up(_) => todo_stub("up"),
         Commands::Shell(_) => todo_stub("shell"),
-        Commands::Ls => todo_stub("ls"),
-        Commands::Info(_) => todo_stub("info"),
         Commands::Logs(_) => todo_stub("logs"),
         Commands::Wait(_) => todo_stub("wait"),
-        Commands::Kill(_) => todo_stub("kill"),
-        Commands::Gc => todo_stub("gc"),
     }
 }
 

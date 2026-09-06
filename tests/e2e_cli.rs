@@ -92,11 +92,33 @@ fn config_file_flavor_override_is_reflected() {
 #[test]
 fn unimplemented_subcommand_fails_with_a_clear_message() {
     qecs()
-        .arg("ls")
+        .arg("shell")
         .assert()
         .failure()
         .code(1)
         .stderr(predicate::str::contains("not implemented yet"));
+}
+
+#[test]
+fn ls_empty_succeeds_and_displays_no_vms_tracked() {
+    let dir = tempfile::tempdir().unwrap();
+    qecs()
+        .arg("ls")
+        .env("XDG_STATE_HOME", dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No active VMs tracked"));
+}
+
+#[test]
+fn ls_json_returns_empty_array_when_no_vms() {
+    let dir = tempfile::tempdir().unwrap();
+    qecs()
+        .args(["ls", "--json"])
+        .env("XDG_STATE_HOME", dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[]"));
 }
 
 #[test]
