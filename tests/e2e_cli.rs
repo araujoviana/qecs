@@ -139,3 +139,16 @@ fn ls_json_returns_empty_array_when_no_vms() {
 fn kill_without_target_is_a_usage_error() {
     qecs().arg("kill").assert().failure().code(2);
 }
+
+#[test]
+fn logs_without_active_vms_reports_error() {
+    let dir = tempfile::tempdir().unwrap();
+    qecs()
+        .args(["logs", "qecs-nonexistent-999"])
+        .env("XDG_STATE_HOME", dir.path())
+        .env("QECS_AK", "mock")
+        .env("QECS_SK", "mock")
+        .assert()
+        .failure()
+        .code(1);
+}

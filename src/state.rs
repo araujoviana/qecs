@@ -21,6 +21,7 @@ pub struct VmRecord {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
 pub struct StateStore {
     pub path: PathBuf,
 }
