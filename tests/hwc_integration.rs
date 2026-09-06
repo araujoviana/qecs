@@ -297,3 +297,86 @@ async fn ims_create_image_and_list_private_deserializes() {
         .unwrap();
     assert_eq!(got["images"][0]["name"], "qecs-gpu-20260906-1200");
 }
+
+#[tokio::test]
+async fn telemetry_records_one_hwc_call_per_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/test"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": 1})))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let tel = {
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+            std::env::remove_var("XDG_STATE_HOME");
+        }
+        qecs::telemetry::Telemetry::init(true, "test").expect("init telemetry")
+    };
+
+    let url = format!("{}/v1/test", server.uri());
+    let client = client().with_telemetry(Some(tel.clone()));
+    let _: serde_json::Value = client
+        .send_json(reqwest::Method::GET, &url, None)
+        .await
+        .unwrap();
+
+    let count = tel.finish(0);
+    assert!(count >= 2);
+
+    let traces_dir = tmp.path().join(".local/state/qecs/traces");
+    let file = std::fs::read_dir(&traces_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .expect("one trace file");
+    let body = std::fs::read_to_string(file).unwrap();
+    let hwc_line: serde_json::Value = body
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .find(|v: &serde_json::Value| v["kind"] == "hwc_call")
+        .expect("hwc_call event present");
+
+    assert_eq!(hwc_line["method"], "GET");
+    assert_eq!(hwc_line["status"], 200);
+    assert_eq!(hwc_line["path"], "/v1/test");
+    assert!(hwc_line["total_ms"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn telemetry_hwc_call_on_transport_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tel = {
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+            std::env::remove_var("XDG_STATE_HOME");
+        }
+        qecs::telemetry::Telemetry::init(true, "test").expect("init telemetry")
+    };
+
+    let url = "http://127.0.0.1:1/v1/dead-endpoint";
+    let client = client().with_telemetry(Some(tel.clone()));
+    let res: Result<serde_json::Value, _> = client.send_json(reqwest::Method::GET, url, None).await;
+    assert!(res.is_err());
+
+    tel.finish(1);
+
+    let traces_dir = tmp.path().join(".local/state/qecs/traces");
+    let file = std::fs::read_dir(&traces_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .expect("one trace file");
+    let body = std::fs::read_to_string(file).unwrap();
+    let hwc_line: serde_json::Value = body
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .find(|v: &serde_json::Value| v["kind"] == "hwc_call")
+        .expect("hwc_call event present on transport error");
+
+    assert_eq!(hwc_line["method"], "GET");
+    assert_eq!(hwc_line["status"], 0);
+    assert!(hwc_line["total_ms"].as_u64().is_some());
+}

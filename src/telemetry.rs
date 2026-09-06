@@ -26,6 +26,7 @@ pub struct HwcCall {
     pub ttfb_ms: u64,
     pub total_ms: u64,
     pub resp_bytes: u64,
+    pub phase: Option<String>,
 }
 
 /// The rollup of a single polling loop (the per-iteration requests still appear as
@@ -550,6 +551,7 @@ mod tests {
             ttfb_ms: 10,
             total_ms: 20,
             resp_bytes: 128,
+            phase: None,
         });
         t.record_poll(PollEvent {
             label: "wait-active srv".into(),
@@ -612,6 +614,7 @@ mod tests {
             ttfb_ms: 0,
             total_ms: 0,
             resp_bytes: 0,
+            phase: None,
         });
         t.set_meta(|m| m.region = Some("r".into()));
     }

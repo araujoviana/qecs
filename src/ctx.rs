@@ -43,5 +43,6 @@ impl Ctx {
 
     pub fn signed(&self) -> SignedClient {
         SignedClient::new(self.http.clone(), self.creds.clone())
+            .with_telemetry(self.telemetry.clone())
     }
 }

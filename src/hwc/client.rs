@@ -1,16 +1,18 @@
-//! A reqwest client that signs every request with SDK-HMAC-SHA256.
 use crate::creds::Credentials;
 use crate::hwc::sign::{self, CanonicalParts};
+use crate::telemetry::{HwcCall, Telemetry, current_phase};
 use reqwest::{
     Method,
     header::{HeaderMap, HeaderName, HeaderValue},
 };
 use serde::de::DeserializeOwned;
+use std::time::Instant;
 
 #[derive(Clone)]
 pub struct SignedClient {
     http: reqwest::Client,
     creds: Credentials,
+    telemetry: Option<Telemetry>,
 }
 
 #[derive(Debug)]
@@ -32,7 +34,16 @@ impl std::error::Error for ApiError {}
 
 impl SignedClient {
     pub fn new(http: reqwest::Client, creds: Credentials) -> Self {
-        SignedClient { http, creds }
+        SignedClient {
+            http,
+            creds,
+            telemetry: None,
+        }
+    }
+
+    pub fn with_telemetry(mut self, telemetry: Option<Telemetry>) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 
     pub(crate) fn signed_headers_for(
@@ -96,19 +107,78 @@ impl SignedClient {
         url: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<T, ApiError> {
+        let t0 = Instant::now();
+        let method_str = method.to_string();
+        let parsed_url = reqwest::Url::parse(url).ok();
+        let host = parsed_url
+            .as_ref()
+            .and_then(|u| u.host_str())
+            .unwrap_or("")
+            .to_string();
+        let path = parsed_url
+            .as_ref()
+            .map(|u| u.path())
+            .unwrap_or("")
+            .to_string();
+
         let raw = body.map(|b| serde_json::to_vec(b).unwrap());
         let headers = self.signed_headers_for(&method, url, raw.as_deref());
         let mut req = self.http.request(method, url).headers(headers);
         if let Some(r) = &raw {
             req = req.body(r.clone());
         }
-        let resp = req.send().await.map_err(|e| ApiError {
-            status: 0,
-            code: None,
-            message: e.to_string(),
-        })?;
+        let send_res = req.send().await;
+        let ttfb = t0.elapsed();
+
+        let resp = match send_res {
+            Ok(r) => r,
+            Err(e) => {
+                let total = t0.elapsed();
+                if let Some(t) = &self.telemetry {
+                    t.record_hwc(HwcCall {
+                        method: method_str,
+                        host,
+                        path,
+                        status: 0,
+                        request_id: None,
+                        ttfb_ms: ttfb.as_millis() as u64,
+                        total_ms: total.as_millis() as u64,
+                        resp_bytes: 0,
+                        phase: current_phase().map(String::from),
+                    });
+                }
+                return Err(ApiError {
+                    status: 0,
+                    code: None,
+                    message: e.to_string(),
+                });
+            }
+        };
+
         let status = resp.status().as_u16();
+        let request_id = resp
+            .headers()
+            .get("x-request-id")
+            .or_else(|| resp.headers().get("x-openstack-request-id"))
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
         let text = resp.text().await.unwrap_or_default();
+        let total = t0.elapsed();
+
+        if let Some(t) = &self.telemetry {
+            t.record_hwc(HwcCall {
+                method: method_str,
+                host,
+                path,
+                status,
+                request_id,
+                ttfb_ms: ttfb.as_millis() as u64,
+                total_ms: total.as_millis() as u64,
+                resp_bytes: text.len() as u64,
+                phase: current_phase().map(String::from),
+            });
+        }
+
         if (200..300).contains(&status) {
             if text.trim().is_empty() {
                 serde_json::from_str::<T>("null").map_err(|e| ApiError {
