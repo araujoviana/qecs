@@ -66,7 +66,8 @@ pub(crate) fn pick_sg_by_name(sgs: Vec<SecurityGroup>, name: &str) -> Option<Sec
 ///
 /// Lists all SGs in the VPC, looks for a name match, and if found returns it.
 /// Otherwise, creates a new SG with the given name and returns it.
-async fn ensure_security_group(
+/// Note: qecs uses a single shared security group named `qecs` per region/account, so reuse-by-name (ignoring `vpc_id`) is intentional.
+pub async fn ensure_security_group(
     c: &SignedClient,
     region: &str,
     project_id: &str,
@@ -96,7 +97,7 @@ async fn ensure_security_group(
 /// Async: ensure an ingress rule exists, creating it if needed.
 ///
 /// Posts the rule; if it already exists (409), returns Ok(()). Other errors are propagated.
-async fn ensure_ingress_rule(
+pub async fn ensure_ingress_rule(
     c: &SignedClient,
     region: &str,
     project_id: &str,
@@ -126,7 +127,7 @@ async fn ensure_ingress_rule(
 }
 
 /// Async: ensure the qecs standard ingress rules (TCP 22 and 443).
-async fn ensure_qecs_rules(
+pub async fn ensure_qecs_rules(
     c: &SignedClient,
     region: &str,
     project_id: &str,
@@ -140,7 +141,6 @@ async fn ensure_qecs_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn rule_body_opens_one_port_from_anywhere() {
