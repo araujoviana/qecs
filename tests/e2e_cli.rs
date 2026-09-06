@@ -92,11 +92,25 @@ fn config_file_flavor_override_is_reflected() {
 #[test]
 fn unimplemented_subcommand_fails_with_a_clear_message() {
     qecs()
-        .arg("shell")
+        .args(["wait", "job-1"])
         .assert()
         .failure()
         .code(1)
         .stderr(predicate::str::contains("not implemented yet"));
+}
+
+#[test]
+fn shell_without_active_vms_reports_error() {
+    let dir = tempfile::tempdir().unwrap();
+    qecs()
+        .arg("shell")
+        .env("XDG_STATE_HOME", dir.path())
+        .env("QECS_AK", "mock")
+        .env("QECS_SK", "mock")
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("no active VMs found"));
 }
 
 #[test]

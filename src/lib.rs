@@ -4,6 +4,7 @@ pub mod cli;
 pub mod cloudinit;
 pub mod commands;
 pub mod config;
+pub mod connect;
 pub mod creds;
 pub mod ctx;
 pub mod error;

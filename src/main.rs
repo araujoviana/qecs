@@ -51,8 +51,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             qecs::commands::gc::cmd_gc(&ctx, cli.global.json).await
         }
         Commands::Run(_) => todo_stub("run"),
-        Commands::Shell(_) => todo_stub("shell"),
-        Commands::Logs(_) => todo_stub("logs"),
+        Commands::Shell(ref args) => {
+            let ctx = qecs::ctx::Ctx::load(&cli)?;
+            qecs::commands::shell::cmd_shell(&ctx, args.clone()).await
+        }
+        Commands::Logs(ref args) => {
+            let ctx = qecs::ctx::Ctx::load(&cli)?;
+            qecs::commands::logs::cmd_logs(&ctx, args.clone()).await
+        }
         Commands::Wait(_) => todo_stub("wait"),
     }
 }
