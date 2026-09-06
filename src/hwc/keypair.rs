@@ -44,8 +44,7 @@ pub(crate) fn import_body(name: &str, public_key: &str) -> serde_json::Value {
     json!({
         "keypair": {
             "name": name,
-            "public_key": public_key,
-            "type": "ssh"
+            "public_key": public_key
         }
     })
 }
@@ -125,7 +124,6 @@ mod tests {
     fn import_body_shape() {
         let b = import_body("qecs", "ssh-ed25519 AAAA... qecs");
         assert_eq!(b["keypair"]["name"], "qecs");
-        assert_eq!(b["keypair"]["type"], "ssh");
         assert!(
             b["keypair"]["public_key"]
                 .as_str()

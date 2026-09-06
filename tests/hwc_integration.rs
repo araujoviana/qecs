@@ -222,3 +222,26 @@ async fn remote_console_response_yields_the_vnc_url() {
         "https://nova-novncproxy.example.myhuaweicloud.com:8002/vnc_auto.html?token=x"
     );
 }
+
+#[tokio::test]
+async fn empty_success_body_is_handled() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/empty"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/empty", server.uri());
+    let val: serde_json::Value = client()
+        .send_json(reqwest::Method::POST, &url, None)
+        .await
+        .unwrap();
+    assert_eq!(val, serde_json::Value::Null);
+
+    let unit: () = client()
+        .send_json(reqwest::Method::POST, &url, None)
+        .await
+        .unwrap();
+    assert_eq!(unit, ());
+}

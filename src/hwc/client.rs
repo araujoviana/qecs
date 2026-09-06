@@ -110,11 +110,19 @@ impl SignedClient {
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
         if (200..300).contains(&status) {
-            serde_json::from_str::<T>(&text).map_err(|e| ApiError {
-                status,
-                code: None,
-                message: format!("decoding response: {e}; body: {text}"),
-            })
+            if text.trim().is_empty() {
+                serde_json::from_str::<T>("null").map_err(|e| ApiError {
+                    status,
+                    code: None,
+                    message: format!("decoding empty response: {e}"),
+                })
+            } else {
+                serde_json::from_str::<T>(&text).map_err(|e| ApiError {
+                    status,
+                    code: None,
+                    message: format!("decoding response: {e}; body: {text}"),
+                })
+            }
         } else {
             let v: serde_json::Value =
                 serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
