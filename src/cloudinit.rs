@@ -1,6 +1,6 @@
 //! Cloud-init rendering for ephemeral ECS instances.
 //! Configures sshd on 22 + 443, authorizes dedicated qecs key,
-//! and installs autonomous `qecs-guard` daemon for hard TTL and idle shutdown.
+//! installs autonomous `qecs-guard` daemon, and optionally installs NVIDIA drivers.
 
 const B64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -29,9 +29,132 @@ pub fn base64_encode(input: &[u8]) -> String {
 
 /// Render the complete `#cloud-config` user-data for Ubuntu instances.
 /// Injects dual-port sshd, dedicated SSH authorized key, autonomous lifecycle guard,
-/// systemd timer, and hard TTL shutdown fallback.
-pub fn render_cloudinit(public_key: &str, ttl_secs: u64, idle_timeout_secs: u64) -> String {
+/// systemd timer, fallback shutdown, and optionally NVIDIA GPU driver setup.
+pub fn render_cloudinit(
+    public_key: &str,
+    ttl_secs: u64,
+    idle_timeout_secs: u64,
+    needs_gpu: bool,
+) -> String {
     let ttl_minutes = (ttl_secs / 60).max(1);
+
+    let gpu_write_files = if needs_gpu {
+        r#"
+  - path: /usr/local/bin/qecs-gpu-setup.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -u
+      LOG="/var/log/qecs-gpu-setup.log"
+      mkdir -p /run/qecs
+      echo "INSTALLING" > /run/qecs/gpu.status
+      echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] Initializing GPU driver setup..." | tee -a "$LOG"
+
+      # 1. Blacklist nouveau if loaded
+      if lsmod | grep -q nouveau; then
+          echo "blacklist nouveau" > /etc/modprobe.d/blacklist-nouveau.conf
+          echo "options nouveau modeset=0" >> /etc/modprobe.d/blacklist-nouveau.conf
+          rmmod nouveau 2>/dev/null || true
+      fi
+
+      export DEBIAN_FRONTEND=noninteractive
+
+      # 2. Wait for package locks if background updates are running
+      for i in $(seq 1 30); do
+          if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+              break
+          fi
+          echo "[qecs-gpu] Waiting for apt/dpkg lock..." >> "$LOG"
+          sleep 2
+      done
+
+      # 3. Install kernel headers and dependencies
+      echo "[qecs-gpu] Installing kernel headers and dependencies..." >> "$LOG"
+      apt-get update >> "$LOG" 2>&1 || true
+      apt-get install -y --no-install-recommends \
+          linux-headers-$(uname -r) \
+          build-essential \
+          dkms \
+          curl \
+          gnupg \
+          pciutils >> "$LOG" 2>&1 || true
+
+      # 4. Install NVIDIA server driver
+      echo "[qecs-gpu] Installing NVIDIA server driver..." >> "$LOG"
+      INSTALLED=0
+
+      if command -v ubuntu-drivers >/dev/null 2>&1; then
+          ubuntu-drivers install --gpgpu >> "$LOG" 2>&1 && INSTALLED=1
+      fi
+      if [ "$INSTALLED" -ne 1 ]; then
+          apt-get install -y --no-install-recommends nvidia-headless-535-server nvidia-utils-535-server >> "$LOG" 2>&1 && INSTALLED=1
+      fi
+      if [ "$INSTALLED" -ne 1 ]; then
+          apt-get install -y --no-install-recommends nvidia-driver-535-server >> "$LOG" 2>&1 && INSTALLED=1
+      fi
+      if [ "$INSTALLED" -ne 1 ]; then
+          apt-get install -y --no-install-recommends nvidia-driver-550-server >> "$LOG" 2>&1 && INSTALLED=1
+      fi
+
+      # 5. Load kernel modules
+      modprobe nvidia >> "$LOG" 2>&1 || true
+      modprobe nvidia_uvm >> "$LOG" 2>&1 || true
+
+      # 6. Install nvidia-container-toolkit for Docker
+      echo "[qecs-gpu] Installing nvidia-container-toolkit..." >> "$LOG"
+      curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg >> "$LOG" 2>&1 || true
+      curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+          sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+          tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >> "$LOG" 2>&1 || true
+      apt-get update >> "$LOG" 2>&1 || true
+      apt-get install -y nvidia-container-toolkit >> "$LOG" 2>&1 || true
+
+      if command -v nvidia-ctk >/dev/null 2>&1; then
+          nvidia-ctk runtime configure --runtime=docker >> "$LOG" 2>&1 || true
+          systemctl restart docker 2>/dev/null || true
+      fi
+
+      # 7. Verification check
+      echo "[qecs-gpu] Verifying with nvidia-smi..." >> "$LOG"
+      if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >> "$LOG" 2>&1; then
+          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] GPU operational." | tee -a "$LOG"
+          touch /run/qecs/gpu.ready
+          echo "READY" > /run/qecs/gpu.status
+          exit 0
+      else
+          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] ERROR: nvidia-smi failed." | tee -a "$LOG"
+          touch /run/qecs/gpu.failed
+          echo "FAILED" > /run/qecs/gpu.status
+          exit 1
+      fi
+
+  - path: /etc/systemd/system/qecs-gpu-setup.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=qecs autonomous GPU driver and container toolkit installer
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/qecs-gpu-setup.sh
+      RemainAfterExit=yes
+      StandardOutput=journal+console
+      StandardError=journal+console
+
+      [Install]
+      WantedBy=multi-user.target
+"#
+    } else {
+        ""
+    };
+
+    let gpu_runcmd = if needs_gpu {
+        "  - [systemctl, enable, --now, qecs-gpu-setup.service]\n"
+    } else {
+        ""
+    };
 
     format!(
         r#"#cloud-config
@@ -137,20 +260,20 @@ write_files:
 
       [Install]
       WantedBy=timers.target
-
+{gpu_write_files}
 runcmd:
   - [systemctl, restart, ssh]
   - [mkdir, -p, /run/qecs]
   - [systemctl, daemon-reload]
   - [systemctl, enable, --now, qecs-guard.timer]
-  - shutdown -h +{ttl_minutes} "qecs hard TTL guard"
+{gpu_runcmd}  - shutdown -h +{ttl_minutes} "qecs hard TTL guard"
 "#
     )
 }
 
 /// Backward-compatible baseline cloudinit helper.
 pub fn render_base_cloudinit(public_key: &str) -> String {
-    render_cloudinit(public_key, 7200, 1200)
+    render_cloudinit(public_key, 7200, 1200, false)
 }
 
 #[cfg(test)]
@@ -169,7 +292,7 @@ mod tests {
     #[test]
     fn test_cloudinit_contains_guard_and_systemd_timer() {
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA qecs";
-        let rendered = render_cloudinit(key, 3600, 600);
+        let rendered = render_cloudinit(key, 3600, 600, false);
 
         assert!(rendered.starts_with("#cloud-config"));
         assert!(rendered.contains(key));
@@ -189,5 +312,24 @@ mod tests {
 
         // Hard fallback shutdown
         assert!(rendered.contains("shutdown -h +60"));
+
+        // No GPU files when disabled
+        assert!(!rendered.contains("qecs-gpu-setup.sh"));
+        assert!(!rendered.contains("qecs-gpu-setup.service"));
+    }
+
+    #[test]
+    fn test_cloudinit_contains_gpu_setup_when_enabled() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA qecs";
+        let rendered = render_cloudinit(key, 7200, 1200, true);
+
+        // Contains GPU setup script and systemd service
+        assert!(rendered.contains("/usr/local/bin/qecs-gpu-setup.sh"));
+        assert!(rendered.contains("/etc/systemd/system/qecs-gpu-setup.service"));
+        assert!(rendered.contains("qecs-gpu-setup.service"));
+        assert!(rendered.contains("nvidia-container-toolkit"));
+        assert!(rendered.contains("/run/qecs/gpu.ready"));
+        assert!(rendered.contains("/run/qecs/gpu.failed"));
+        assert!(rendered.contains("nvidia-smi"));
     }
 }

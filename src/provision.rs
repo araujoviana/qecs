@@ -80,11 +80,13 @@ pub fn generate_vm_name(template: &str, preset: &str) -> String {
 }
 
 /// Find the first AZ in `region` where `flavor_id` is sellable.
+/// If `strict` is true (e.g. for GPU presets) and no AZ has stock, returns an error.
 pub async fn pick_az(
     client: &crate::hwc::client::SignedClient,
     region: &str,
     project_id: &str,
     flavor_id: &str,
+    strict: bool,
 ) -> anyhow::Result<String> {
     // Try typical AZ suffixes: a, b, c, d, e, f
     let candidates = ["a", "b", "c", "d", "e", "f"];
@@ -95,6 +97,14 @@ pub async fn pick_az(
             return Ok(az);
         }
     }
+
+    if strict {
+        anyhow::bail!(
+            "flavor `{flavor_id}` is not available or sold out in any AZ for region `{region}`. \
+             Try another region with better GPU availability (e.g. ap-southeast-3)."
+        );
+    }
+
     // Fall back to first AZ if not found via filter
     Ok(format!("{region}a"))
 }
@@ -117,8 +127,15 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
         .await
         .context("discovering IAM project ID")?;
 
-    // 3. Select target AZ where flavor is in stock
-    let az = pick_az(&client, &region, &project.id, &resolved.flavor).await?;
+    // 3. Select target AZ where flavor is in stock (strict validation if GPU required)
+    let az = pick_az(
+        &client,
+        &region,
+        &project.id,
+        &resolved.flavor,
+        resolved.needs_gpu,
+    )
+    .await?;
 
     // 4. Ensure local SSH keypair
     let (_key_paths, public_key) =
@@ -170,8 +187,12 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
     // 7. Cloud-init user data
     let idle_duration =
         parse_duration(&ctx.config.idle_timeout).unwrap_or(Duration::from_secs(1200));
-    let user_data_raw =
-        cloudinit::render_cloudinit(&public_key, ttl_duration.as_secs(), idle_duration.as_secs());
+    let user_data_raw = cloudinit::render_cloudinit(
+        &public_key,
+        ttl_duration.as_secs(),
+        idle_duration.as_secs(),
+        resolved.needs_gpu,
+    );
     let user_data_b64 = cloudinit::base64_encode(user_data_raw.as_bytes());
 
     // 8. Assemble CreateServer spec
@@ -261,5 +282,54 @@ mod tests {
         let name = generate_vm_name("qecs-{preset}-{shortid}", "normal");
         assert!(name.starts_with("qecs-normal-"));
         assert_eq!(name.len(), "qecs-normal-".len() + 4);
+    }
+
+    #[tokio::test]
+    async fn test_pick_az_strict_fails_when_no_az_has_flavor() {
+        let client = crate::hwc::client::SignedClient::new(
+            reqwest::Client::new(),
+            crate::creds::Credentials {
+                ak: "dummy_ak".into(),
+                sk: "dummy_sk".into(),
+                security_token: None,
+            },
+        );
+
+        let err = pick_az(
+            &client,
+            "ap-southeast-3",
+            "test_proj",
+            "gpu.unavailable",
+            true,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("gpu.unavailable"));
+        assert!(err.to_string().contains("not available or sold out"));
+    }
+
+    #[tokio::test]
+    async fn test_pick_az_non_strict_falls_back_to_first_az() {
+        let client = crate::hwc::client::SignedClient::new(
+            reqwest::Client::new(),
+            crate::creds::Credentials {
+                ak: "dummy_ak".into(),
+                sk: "dummy_sk".into(),
+                security_token: None,
+            },
+        );
+
+        let az = pick_az(
+            &client,
+            "ap-southeast-3",
+            "test_proj",
+            "normal.flavor",
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(az, "ap-southeast-3a");
     }
 }

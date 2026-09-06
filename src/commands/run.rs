@@ -1,6 +1,6 @@
 //! `qecs run` command: provisions a VM, ships workdir, executes recipe, pulls artifacts, and tears down.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -87,7 +87,22 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     .context("uploading workspace to VM")?;
     pb.finish_and_clear();
 
-    // 7. Execution: Detached vs Attached
+    // 7. Await GPU readiness if GPU preset is active
+    if final_preset.needs_gpu() {
+        let pb = crate::ui::spinner(
+            "Waiting for NVIDIA GPU driver and container toolkit installation (~4-8m)...",
+        );
+        wait_for_gpu_ready(&ip, port, &paths.private_key, Duration::from_secs(900)).await?;
+        pb.finish_and_clear();
+        println!(
+            "{}",
+            "✓ NVIDIA GPU driver and container toolkit ready."
+                .green()
+                .bold()
+        );
+    }
+
+    // 8. Execution: Detached vs Attached
     if args.detach {
         execute::execute_job_detached(
             &ip,
@@ -240,4 +255,76 @@ async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Result<()
     let store = StateStore::open()?;
     let _ = store.remove(name);
     Ok(())
+}
+
+async fn wait_for_gpu_ready(
+    ip: &str,
+    port: u16,
+    key_path: &Path,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let start = Instant::now();
+    let poll_cmd = "[ -f /run/qecs/gpu.status ] && cat /run/qecs/gpu.status";
+
+    while start.elapsed() < timeout {
+        let output = std::process::Command::new("ssh")
+            .args([
+                "-i",
+                key_path.to_str().unwrap(),
+                "-p",
+                &port.to_string(),
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "LogLevel=ERROR",
+                &format!("ubuntu@{ip}"),
+                poll_cmd,
+            ])
+            .output();
+
+        if let Ok(out) = output
+            && out.status.success()
+        {
+            let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if status == "READY" {
+                return Ok(());
+            } else if status == "FAILED" {
+                let log_cmd = "tail -n 25 /var/log/qecs-gpu-setup.log 2>/dev/null || true";
+                let log_output = std::process::Command::new("ssh")
+                    .args([
+                        "-i",
+                        key_path.to_str().unwrap(),
+                        "-p",
+                        &port.to_string(),
+                        "-o",
+                        "StrictHostKeyChecking=accept-new",
+                        "-o",
+                        "IdentitiesOnly=yes",
+                        "-o",
+                        "LogLevel=ERROR",
+                        &format!("ubuntu@{ip}"),
+                        log_cmd,
+                    ])
+                    .output();
+                let details = if let Ok(l) = log_output {
+                    String::from_utf8_lossy(&l.stdout).trim().to_string()
+                } else {
+                    String::new()
+                };
+                anyhow::bail!(
+                    "NVIDIA GPU driver setup failed on remote VM `{ip}`.\n\
+                     Log snippet (/var/log/qecs-gpu-setup.log):\n{details}"
+                );
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
+    anyhow::bail!(
+        "Timed out waiting for GPU driver installation after {} seconds on `{ip}`.",
+        timeout.as_secs()
+    );
 }
