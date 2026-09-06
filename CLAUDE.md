@@ -40,7 +40,15 @@ Project-specific context for `qecs`. Read this before making changes.
   `~/Projetos/python-projs/mcp-hwc/.env`, keys `HWC_AK`/`HWC_SK`/optional `HWC_SECURITY_TOKEN`);
   interactive prompt (TTY only, suppressed by `--json`/`--quiet`).
 - **Default region `ap-southeast-3`** (best GPU stock; latency irrelevant for
-  upload-once/download-once jobs). Config-overridable; non-GPU work can pin `sa-brazil-1`.
+  upload-once/download-once jobs). Config-overridable; non-GPU work can pin `sa-brazil-1`
+  (~10x faster per round trip from Brazil, so CPU/RAM presets should prefer it).
+- **Network**: HWC responses dominate wall time (RTT + server-side work), local work is
+  sub-millisecond. `reqwest` has the `gzip` feature on (auto-decompress, no header handling
+  needed; the flavors list is 1.3 MB -> ~64 KB on the wire). For flavor validation use
+  `flavors::find_flavor` (server-side `flavor_id` + `availability_zone` filters, ~1.7 s,
+  a few KB) -- **never** the full `list_flavors` catalog on the provision path. HWC sends no
+  `ETag`/`Last-Modified`, so any on-disk cache must be TTL-only. Full brainstorm:
+  `docs/superpowers/notes/2026-09-05-network-optimizations.md`.
 - **project_id** is region-scoped. Read it from any flavor's `links[].href` in the ECS flavors
   response, or via IAM (branch 2's first task). Live test / timing example take it from
   `QECS_PROJECT_ID` as a stopgap.

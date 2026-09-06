@@ -29,7 +29,8 @@ More commands arrive with the provisioning branch.
 `cargo run --release --example workflow_timing` (with `QECS_AK`, `QECS_SK`,
 `QECS_PROJECT_ID`, `QECS_REGION` set) times the real list-flavors call phase by
 phase. Every local phase combined is well under a millisecond; the network is
-essentially all of the wall time.
+essentially all of the wall time. Non-GPU presets are much faster from a nearby
+region (`sa-brazil-1`) than from `ap-southeast-3`.
 
 Commits must follow Conventional Commits: the `post-commit` hook bumps the
 `Cargo.toml` version from the type (`feat:` minor, `feat!:`/`BREAKING CHANGE`
