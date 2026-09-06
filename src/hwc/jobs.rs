@@ -36,6 +36,9 @@ pub(crate) struct JobResp {
 pub(crate) struct JobEntities {
     #[serde(default)]
     pub(crate) sub_jobs: Vec<SubJob>,
+    /// IMS `createImageByServer` reports the new image id here, not in `sub_jobs`.
+    #[serde(default)]
+    pub(crate) image_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,9 +57,12 @@ pub(crate) struct SubJobEntities {
     pub(crate) image_id: Option<String>,
 }
 
-/// Build the ECS-host jobs endpoint URL (mirrors `iam::projects_url`).
-pub(crate) fn job_url(region: &str, project_id: &str, job_id: &str) -> String {
-    let host = endpoint_host(Service::Ecs, region);
+/// Build the async-jobs endpoint URL for `service`. The path is identical across
+/// services (`/v1/{project_id}/jobs/{job_id}`); only the host differs, and a job
+/// must be queried on the same service that issued it (ECS create/delete on the
+/// ECS host, IMS image bake on the IMS host).
+pub(crate) fn job_url(service: Service, region: &str, project_id: &str, job_id: &str) -> String {
+    let host = endpoint_host(service, region);
     format!("https://{host}/v1/{project_id}/jobs/{job_id}")
 }
 
@@ -67,6 +73,9 @@ pub(crate) fn job_outcome(resp: JobResp) -> Poll<anyhow::Result<JobResult>> {
         JobStatus::Success => {
             let mut server_ids = Vec::new();
             let mut image_ids = Vec::new();
+            if let Some(iid) = resp.entities.image_id {
+                image_ids.push(iid);
+            }
             for sj in resp.entities.sub_jobs {
                 if let Some(sid) = sj.entities.server_id {
                     server_ids.push(sid);
@@ -103,12 +112,13 @@ pub(crate) fn job_outcome(resp: JobResp) -> Poll<anyhow::Result<JobResult>> {
 /// Poll `GET /v1/{project_id}/jobs/{job_id}` until the job reaches SUCCESS or FAIL.
 pub async fn poll_job(
     c: &SignedClient,
+    service: Service,
     region: &str,
     project_id: &str,
     job_id: &str,
     cfg: &PollConfig,
 ) -> anyhow::Result<JobResult> {
-    let url = job_url(region, project_id, job_id);
+    let url = job_url(service, region, project_id, job_id);
     poll_until(cfg, &format!("job {job_id}"), || async {
         let resp: JobResp = c
             .send_json(reqwest::Method::GET, &url, None)
@@ -168,8 +178,28 @@ mod tests {
     #[test]
     fn job_url_is_ecs_host_with_v1_jobs_path() {
         assert_eq!(
-            job_url("ap-southeast-3", "proj-42", "job-abc"),
+            job_url(Service::Ecs, "ap-southeast-3", "proj-42", "job-abc"),
             "https://ecs.ap-southeast-3.myhuaweicloud.com/v1/proj-42/jobs/job-abc"
         );
+    }
+
+    #[test]
+    fn ims_job_url_targets_the_ims_host() {
+        assert_eq!(
+            job_url(Service::Ims, "ap-southeast-3", "proj-42", "job-img"),
+            "https://ims.ap-southeast-3.myhuaweicloud.com/v1/proj-42/jobs/job-img"
+        );
+    }
+
+    #[test]
+    fn ims_success_job_yields_image_id_from_top_level_entities() {
+        // IMS createImageByServer puts image_id directly under entities, not in sub_jobs.
+        let j = r#"{"status":"SUCCESS","job_id":"j","job_type":"createImageByServer",
+            "entities":{"image_id":"img-9f3a"}}"#;
+        let Poll::Ready(Ok(r)) = job_outcome(serde_json::from_str(j).unwrap()) else {
+            panic!("expected ready-ok")
+        };
+        assert_eq!(r.image_ids, ["img-9f3a"]);
+        assert!(r.server_ids.is_empty());
     }
 }

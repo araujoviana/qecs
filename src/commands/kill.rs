@@ -2,6 +2,7 @@
 use crate::cli::KillArgs;
 use crate::ctx::Ctx;
 use crate::hwc::ecs;
+use crate::hwc::endpoints::Service;
 use crate::hwc::iam;
 use crate::hwc::jobs;
 use crate::hwc::wait::PollConfig;
@@ -26,6 +27,7 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
         let job_id = ecs::delete_servers(&client, &region, &project.id, &ids).await?;
         jobs::poll_job(
             &client,
+            Service::Ecs,
             &region,
             &project.id,
             &job_id,
@@ -59,6 +61,7 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
         let job_id = ecs::delete_servers(&client, &region, &project.id, &[&server_id]).await?;
         jobs::poll_job(
             &client,
+            Service::Ecs,
             &region,
             &project.id,
             &job_id,

@@ -10,6 +10,7 @@ use crate::cli::RunArgs;
 use crate::connect;
 use crate::ctx::Ctx;
 use crate::hwc::ecs;
+use crate::hwc::endpoints::Service;
 use crate::hwc::iam;
 use crate::hwc::jobs;
 use crate::hwc::wait::PollConfig;
@@ -124,6 +125,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
             "/home/ubuntu/workspace",
             &recipe.setup_commands,
             &recipe.run_command,
+            &recipe.output_dir,
         )?;
 
         updated_vm.job = Some(vm.name.clone());
@@ -173,6 +175,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         &paths.private_key,
         proxy_cmd.as_deref(),
         "/home/ubuntu/workspace",
+        &recipe.output_dir,
         &local_output_dir,
     ) {
         Ok(true) => {
@@ -264,6 +267,7 @@ pub async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Resul
     let job_id = ecs::delete_servers(&client, &region, &project.id, &[server_id]).await?;
     let _ = jobs::poll_job(
         &client,
+        Service::Ecs,
         &region,
         &project.id,
         &job_id,

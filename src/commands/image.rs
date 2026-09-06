@@ -8,6 +8,7 @@ use tabled::Tabled;
 
 use crate::cli::{ImageAction, ImageArgs, ImageBuildArgs, ImageDeleteArgs};
 use crate::ctx::Ctx;
+use crate::hwc::endpoints::Service;
 use crate::hwc::images;
 use crate::hwc::jobs;
 use crate::hwc::wait::PollConfig;
@@ -172,9 +173,16 @@ async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs) -> anyhow::Result<()> 
     };
 
     let project = crate::hwc::iam::discover_project(&client, &region).await?;
-    let job_res = jobs::poll_job(&client, &region, &project.id, &job_id, &poll_cfg)
-        .await
-        .context("waiting for IMS image creation job to complete")?;
+    let job_res = jobs::poll_job(
+        &client,
+        Service::Ims,
+        &region,
+        &project.id,
+        &job_id,
+        &poll_cfg,
+    )
+    .await
+    .context("waiting for IMS image creation job to complete")?;
     pb.finish_and_clear();
 
     let created_image_id = job_res

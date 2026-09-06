@@ -10,6 +10,7 @@ use crate::commands::shell::resolve_target_vm;
 use crate::connect;
 use crate::ctx::Ctx;
 use crate::hwc::ecs;
+use crate::hwc::endpoints::Service;
 use crate::hwc::iam;
 use crate::hwc::jobs;
 use crate::hwc::wait::PollConfig;
@@ -77,6 +78,19 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
             .bold()
     );
 
+    // Recover the recipe's output dir from the marker the detached launcher dropped
+    // (falls back to "out" for older jobs or a missing marker).
+    let output_subdir = {
+        let marker = crate::run::execute::DETACHED_OUTPUT_MARKER;
+        let out = connect::build_ssh_command(&ip, port, &paths.private_key, proxy_cmd.as_deref())
+            .arg(format!("cat {marker} 2>/dev/null || true"))
+            .output();
+        out.ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "out".to_string())
+    };
+
     // Pull output artifacts
     let local_out = PathBuf::from("./out");
     let pb = crate::ui::spinner("Checking for output artifacts...");
@@ -86,6 +100,7 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
         &paths.private_key,
         proxy_cmd.as_deref(),
         "/home/ubuntu/workspace",
+        &output_subdir,
         &local_out,
     ) {
         Ok(true) => {
@@ -116,6 +131,7 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
     let job_id = ecs::delete_servers(&client, &region, &project.id, &[&vm.id]).await?;
     let _ = jobs::poll_job(
         &client,
+        Service::Ecs,
         &region,
         &project.id,
         &job_id,

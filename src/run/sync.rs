@@ -146,7 +146,19 @@ pub fn upload_workdir(
     Ok(())
 }
 
-/// Download `./out` artifacts from remote directory if they exist.
+/// Shell test that the remote output directory exists and is non-empty.
+fn remote_output_check_cmd(remote_dir: &str, output_subdir: &str) -> String {
+    let dir = format!("{remote_dir}/{output_subdir}");
+    format!("[ -d '{dir}' ] && [ \"$(ls -A '{dir}' 2>/dev/null)\" ]")
+}
+
+/// Shell command that streams the remote output directory back as a gzipped tarball.
+fn remote_output_stream_cmd(remote_dir: &str, output_subdir: &str) -> String {
+    let dir = format!("{remote_dir}/{output_subdir}");
+    format!("tar -czf - -C '{dir}' .")
+}
+
+/// Download the recipe's output directory (relative to `remote_dir`) if it exists.
 /// Returns `Ok(true)` if artifacts were found and downloaded, `Ok(false)` if none were generated.
 pub fn download_output(
     ip: &str,
@@ -154,11 +166,11 @@ pub fn download_output(
     key_path: &Path,
     proxy_command: Option<&str>,
     remote_dir: &str,
+    output_subdir: &str,
     local_out: &Path,
 ) -> anyhow::Result<bool> {
     // Check if remote output dir exists and contains files
-    let check_cmd =
-        format!("[ -d '{remote_dir}/out' ] && [ \"$(ls -A '{remote_dir}/out' 2>/dev/null)\" ]");
+    let check_cmd = remote_output_check_cmd(remote_dir, output_subdir);
     let check_status = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
         .arg(&check_cmd)
         .status()
@@ -169,7 +181,7 @@ pub fn download_output(
     }
 
     // Stream tarball back
-    let remote_stream_cmd = format!("tar -czf - -C '{remote_dir}/out' .");
+    let remote_stream_cmd = remote_output_stream_cmd(remote_dir, output_subdir);
     let mut child = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
         .arg(&remote_stream_cmd)
         .stdout(Stdio::piped())
@@ -247,5 +259,21 @@ mod tests {
         assert!(!entries.iter().any(|p| p == Path::new(".env")));
         assert!(!entries.iter().any(|p| p == Path::new("id_rsa.key")));
         assert!(!entries.iter().any(|p| p == Path::new("custom_ignore.txt")));
+    }
+
+    #[test]
+    fn output_commands_target_the_recipe_output_subdir_not_a_hardcoded_out() {
+        let check = remote_output_check_cmd("/home/ubuntu/workspace", "results");
+        assert!(check.contains("/home/ubuntu/workspace/results"));
+        assert!(!check.contains("workspace/out"));
+
+        let stream = remote_output_stream_cmd("/home/ubuntu/workspace", "results");
+        assert!(stream.contains("-C '/home/ubuntu/workspace/results'"));
+    }
+
+    #[test]
+    fn output_commands_default_subdir_is_out() {
+        let check = remote_output_check_cmd("/home/ubuntu/workspace", "out");
+        assert!(check.contains("/home/ubuntu/workspace/out"));
     }
 }

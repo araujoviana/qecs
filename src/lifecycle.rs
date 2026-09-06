@@ -2,6 +2,7 @@
 
 use crate::ctx::Ctx;
 use crate::hwc::ecs;
+use crate::hwc::endpoints::Service;
 use crate::hwc::iam;
 use crate::hwc::jobs;
 use crate::hwc::wait::PollConfig;
@@ -90,6 +91,7 @@ pub async fn reconcile_and_purge(ctx: &Ctx) -> anyhow::Result<GcStats> {
         let job_id = ecs::delete_servers(&client, &region, &project.id, &dead_servers).await?;
         jobs::poll_job(
             &client,
+            Service::Ecs,
             &region,
             &project.id,
             &job_id,

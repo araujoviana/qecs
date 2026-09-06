@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::cloudinit;
 use crate::ctx::Ctx;
 use crate::hwc::ecs::{self, CreateServer};
+use crate::hwc::endpoints::Service;
 use crate::hwc::flavors;
 use crate::hwc::iam;
 use crate::hwc::images::{self, Platform};
@@ -236,9 +237,16 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
         .context("submitting ECS create request")?;
 
     let poll_cfg = PollConfig::default();
-    let job_res = jobs::poll_job(&client, &region, &project.id, &job_id, &poll_cfg)
-        .await
-        .context("waiting for ECS create job to finish")?;
+    let job_res = jobs::poll_job(
+        &client,
+        Service::Ecs,
+        &region,
+        &project.id,
+        &job_id,
+        &poll_cfg,
+    )
+    .await
+    .context("waiting for ECS create job to finish")?;
 
     let server_id = job_res
         .server_ids
