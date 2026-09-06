@@ -16,6 +16,7 @@ use crate::hwc::jobs;
 use crate::hwc::wait::PollConfig;
 use crate::keys;
 use crate::run::sync;
+use crate::telemetry::TelemetryExt;
 
 pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
     let (paths, _pub_key) = keys::ensure_keypair(None)?;
@@ -110,15 +111,19 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
     // Pull output artifacts
     let local_out = PathBuf::from("./out");
     let pb = crate::ui::spinner("Checking for output artifacts...");
-    match sync::download_output(
-        &ip,
-        port,
-        &paths.private_key,
-        proxy_cmd.as_deref(),
-        "/home/ubuntu/workspace",
-        &output_subdir,
-        &local_out,
-    ) {
+    let dl_res = {
+        let _p = ctx.telemetry.phase("output-download");
+        sync::download_output(
+            &ip,
+            port,
+            &paths.private_key,
+            proxy_cmd.as_deref(),
+            "/home/ubuntu/workspace",
+            &output_subdir,
+            &local_out,
+        )
+    };
+    match dl_res {
         Ok(true) => {
             pb.finish_and_clear();
             println!(
@@ -140,22 +145,25 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
 
     // Auto-destroy VM
     let pb = crate::ui::spinner(format!("Tearing down VM `{}`...", vm.name));
-    let region = ctx.region();
-    let client = ctx.signed();
-    let project = iam::discover_project(&client, &region).await?;
+    {
+        let _p = ctx.telemetry.phase("destroy");
+        let region = ctx.region();
+        let client = ctx.signed();
+        let project = iam::discover_project(&client, &region).await?;
 
-    let job_id = ecs::delete_servers(&client, &region, &project.id, &[&vm.id]).await?;
-    let _ = jobs::poll_job(
-        &client,
-        Service::Ecs,
-        &region,
-        &project.id,
-        &job_id,
-        &PollConfig::default(),
-        ctx.telemetry.as_ref(),
-    )
-    .await;
-    let _ = store.remove(&vm.name);
+        let job_id = ecs::delete_servers(&client, &region, &project.id, &[&vm.id]).await?;
+        let _ = jobs::poll_job(
+            &client,
+            Service::Ecs,
+            &region,
+            &project.id,
+            &job_id,
+            &PollConfig::default(),
+            ctx.telemetry.as_ref(),
+        )
+        .await;
+        let _ = store.remove(&vm.name);
+    }
     pb.finish_and_clear();
     println!(
         "{}",

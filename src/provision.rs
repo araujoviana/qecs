@@ -126,9 +126,12 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
     let resolved = presets::resolve(preset, &ctx.config, opts.flavor.as_deref());
 
     // 2. Discover IAM project id
-    let project = iam::discover_project(&client, &region)
-        .await
-        .context("discovering IAM project ID")?;
+    let project = {
+        let _p = ctx.telemetry.phase("iam-project");
+        iam::discover_project(&client, &region)
+            .await
+            .context("discovering IAM project ID")?
+    };
 
     // 3. Select target AZ where flavor is in stock (strict validation if GPU required)
     let az = pick_az(
@@ -146,9 +149,12 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
 
     // 5. Ensure core infrastructure
     // A: Ensure VPC
-    let vpc = vpc::ensure_vpc(&client, &region, &project.id, "qecs", "192.168.0.0/16")
-        .await
-        .context("ensuring VPC")?;
+    let vpc = {
+        let _p = ctx.telemetry.phase("ensure-vpc");
+        vpc::ensure_vpc(&client, &region, &project.id, "qecs", "192.168.0.0/16")
+            .await
+            .context("ensuring VPC")?
+    };
 
     // B: Run independent ensures concurrently (Subnet, Security Group + rules, Keypair, Image)
     let subnet_fut = vpc::ensure_subnet(
@@ -179,7 +185,12 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
         !opts.no_baked_image,
     );
 
-    let (subnet, sg, _kp, img) = tokio::try_join!(subnet_fut, sg_fut, keypair_fut, image_fut)?;
+    let (subnet, sg, _kp, img) = tokio::try_join!(
+        ctx.telemetry.phase_async("ensure-subnet", subnet_fut),
+        ctx.telemetry.phase_async("ensure-sg", sg_fut),
+        ctx.telemetry.phase_async("import-keypair", keypair_fut),
+        ctx.telemetry.phase_async("resolve-image", image_fut),
+    )?;
 
     // 6. Name and TTL
     let preset_str = preset.to_string();
@@ -205,14 +216,17 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
     let idle_duration =
         parse_duration(&ctx.config.idle_timeout).unwrap_or(Duration::from_secs(1200));
     let relay = crate::connect::Relay::from_config(ctx.config.relay.as_ref())?;
-    let user_data_raw = cloudinit::render_cloudinit(
-        &public_key,
-        ttl_duration.as_secs(),
-        idle_duration.as_secs(),
-        resolved.needs_gpu,
-        Some(&relay),
-    );
-    let user_data_b64 = cloudinit::base64_encode(user_data_raw.as_bytes());
+    let user_data_b64 = {
+        let _p = ctx.telemetry.phase("render-cloudinit");
+        let raw = cloudinit::render_cloudinit(
+            &public_key,
+            ttl_duration.as_secs(),
+            idle_duration.as_secs(),
+            resolved.needs_gpu,
+            Some(&relay),
+        );
+        cloudinit::base64_encode(raw.as_bytes())
+    };
 
     // 8. Assemble CreateServer spec
     let spec = CreateServer {
@@ -241,38 +255,47 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
     }
 
     // 10. Provision server
-    let job_id = ecs::create_server(&client, &region, &project.id, &spec)
-        .await
-        .context("submitting ECS create request")?;
+    let job_id = {
+        let _p = ctx.telemetry.phase("create-ecs");
+        ecs::create_server(&client, &region, &project.id, &spec)
+            .await
+            .context("submitting ECS create request")?
+    };
 
     let poll_cfg = PollConfig::default();
-    let job_res = jobs::poll_job(
-        &client,
-        Service::Ecs,
-        &region,
-        &project.id,
-        &job_id,
-        &poll_cfg,
-        ctx.telemetry.as_ref(),
-    )
-    .await
-    .context("waiting for ECS create job to finish")?;
+    let job_res = {
+        let _p = ctx.telemetry.phase("wait-create-job");
+        jobs::poll_job(
+            &client,
+            Service::Ecs,
+            &region,
+            &project.id,
+            &job_id,
+            &poll_cfg,
+            ctx.telemetry.as_ref(),
+        )
+        .await
+        .context("waiting for ECS create job to finish")?
+    };
 
     let server_id = job_res
         .server_ids
         .first()
         .context("create job completed without returning a server_id")?;
 
-    let server = ecs::wait_active(
-        &client,
-        &region,
-        &project.id,
-        server_id,
-        &poll_cfg,
-        ctx.telemetry.as_ref(),
-    )
-    .await
-    .context("waiting for server to reach ACTIVE status")?;
+    let server = {
+        let _p = ctx.telemetry.phase("wait-active");
+        ecs::wait_active(
+            &client,
+            &region,
+            &project.id,
+            server_id,
+            &poll_cfg,
+            ctx.telemetry.as_ref(),
+        )
+        .await
+        .context("waiting for server to reach ACTIVE status")?
+    };
 
     let rec = VmRecord {
         id: server.id,
@@ -365,5 +388,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(az, "ap-southeast-3a");
+    }
+
+    #[test]
+    fn phase_names_are_the_canonical_set() {
+        use crate::telemetry::PHASES;
+        let expected = [
+            "creds-resolve",
+            "config-load",
+            "iam-project",
+            "ensure-vpc",
+            "ensure-subnet",
+            "ensure-sg",
+            "import-keypair",
+            "resolve-image",
+            "render-cloudinit",
+            "create-ecs",
+            "wait-create-job",
+            "wait-active",
+            "ssh-probe",
+            "workdir-pack",
+            "workdir-upload",
+            "gpu-wait",
+            "job-exec",
+            "output-download",
+            "image-create",
+            "destroy",
+        ];
+        assert_eq!(PHASES, expected);
     }
 }

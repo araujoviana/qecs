@@ -21,6 +21,7 @@ use crate::run::detect::{RunRecipe, detect_recipe};
 use crate::run::execute;
 use crate::run::sync;
 use crate::state::StateStore;
+use crate::telemetry::TelemetryExt;
 
 pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     // 1. Resolve workdir & detect recipe
@@ -68,7 +69,10 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         vm.name
     ));
     let relay = crate::connect::Relay::from_config(ctx.config.relay.as_ref())?;
-    let port = wait_for_ssh_ready(&ip, Duration::from_secs(90), &relay).await?;
+    let port = {
+        let _p = ctx.telemetry.phase("ssh-probe");
+        wait_for_ssh_ready(&ip, Duration::from_secs(90), &relay).await?
+    };
     pb.finish_and_clear();
 
     // Cache port in state store
@@ -81,16 +85,22 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
 
     // 6. Pack & upload workdir
     let pb = crate::ui::spinner("Packing and uploading workspace...");
-    let tarball = sync::pack_directory(&recipe.workdir).context("packing workspace")?;
-    sync::upload_workdir(
-        &ip,
-        port,
-        &paths.private_key,
-        proxy_cmd.as_deref(),
-        &tarball,
-        "/home/ubuntu/workspace",
-    )
-    .context("uploading workspace to VM")?;
+    let tarball = {
+        let _p = ctx.telemetry.phase("workdir-pack");
+        sync::pack_directory(&recipe.workdir).context("packing workspace")?
+    };
+    {
+        let _p = ctx.telemetry.phase("workdir-upload");
+        sync::upload_workdir(
+            &ip,
+            port,
+            &paths.private_key,
+            proxy_cmd.as_deref(),
+            &tarball,
+            "/home/ubuntu/workspace",
+        )
+        .context("uploading workspace to VM")?;
+    }
     pb.finish_and_clear();
 
     // 7. Await GPU readiness if GPU preset is active
@@ -98,14 +108,17 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         let pb = crate::ui::spinner(
             "Waiting for NVIDIA GPU driver and container toolkit installation (~4-8m)...",
         );
-        wait_for_gpu_ready(
-            &ip,
-            port,
-            &paths.private_key,
-            proxy_cmd.as_deref(),
-            Duration::from_secs(900),
-        )
-        .await?;
+        {
+            let _p = ctx.telemetry.phase("gpu-wait");
+            wait_for_gpu_ready(
+                &ip,
+                port,
+                &paths.private_key,
+                proxy_cmd.as_deref(),
+                Duration::from_secs(900),
+            )
+            .await?;
+        }
         pb.finish_and_clear();
         println!(
             "{}",
@@ -117,16 +130,19 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
 
     // 8. Execution: Detached vs Attached
     if args.detach {
-        execute::execute_job_detached(
-            &ip,
-            port,
-            &paths.private_key,
-            proxy_cmd.as_deref(),
-            "/home/ubuntu/workspace",
-            &recipe.setup_commands,
-            &recipe.run_command,
-            &recipe.output_dir,
-        )?;
+        {
+            let _p = ctx.telemetry.phase("job-exec");
+            execute::execute_job_detached(
+                &ip,
+                port,
+                &paths.private_key,
+                proxy_cmd.as_deref(),
+                "/home/ubuntu/workspace",
+                &recipe.setup_commands,
+                &recipe.run_command,
+                &recipe.output_dir,
+            )?;
+        }
 
         updated_vm.job = Some(vm.name.clone());
         let _ = store.upsert(updated_vm);
@@ -153,15 +169,18 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         .bold()
     );
 
-    let exit_code = execute::execute_job_attached(
-        &ip,
-        port,
-        &paths.private_key,
-        proxy_cmd.as_deref(),
-        "/home/ubuntu/workspace",
-        &recipe.setup_commands,
-        &recipe.run_command,
-    )?;
+    let exit_code = {
+        let _p = ctx.telemetry.phase("job-exec");
+        execute::execute_job_attached(
+            &ip,
+            port,
+            &paths.private_key,
+            proxy_cmd.as_deref(),
+            "/home/ubuntu/workspace",
+            &recipe.setup_commands,
+            &recipe.run_command,
+        )?
+    };
 
     // 8. Pull output artifacts
     let local_output_dir = args
@@ -169,15 +188,19 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         .unwrap_or_else(|| recipe.workdir.join(&recipe.output_dir));
 
     let pb = crate::ui::spinner("Checking for output artifacts...");
-    match sync::download_output(
-        &ip,
-        port,
-        &paths.private_key,
-        proxy_cmd.as_deref(),
-        "/home/ubuntu/workspace",
-        &recipe.output_dir,
-        &local_output_dir,
-    ) {
+    let dl_res = {
+        let _p = ctx.telemetry.phase("output-download");
+        sync::download_output(
+            &ip,
+            port,
+            &paths.private_key,
+            proxy_cmd.as_deref(),
+            "/home/ubuntu/workspace",
+            &recipe.output_dir,
+            &local_output_dir,
+        )
+    };
+    match dl_res {
         Ok(true) => {
             pb.finish_and_clear();
             println!(
@@ -260,6 +283,7 @@ async fn wait_for_ssh_ready(
 }
 
 pub async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Result<()> {
+    let _p = ctx.telemetry.phase("destroy");
     let region = ctx.region();
     let client = ctx.signed();
     let project = iam::discover_project(&client, &region).await?;
