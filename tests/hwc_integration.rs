@@ -151,3 +151,74 @@ async fn post_body_is_sent_and_content_type_set() {
     let sent: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert_eq!(sent["server"]["name"], "qecs-gpu-ab12");
 }
+
+#[tokio::test]
+async fn list_servers_shape_parses_into_flattened_server() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/P/cloudservers/detail"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1,
+            "servers": [{
+                "id": "1bdf5b7a",
+                "name": "qecs-normal-a1b2c3",
+                "status": "ACTIVE",
+                "OS-EXT-AZ:availability_zone": "ap-southeast-3a",
+                "OS-EXT-STS:power_state": 1,
+                "flavor": { "id": "s7n.2xlarge.2" },
+                "addresses": {
+                    "99dd236b": [
+                        {"version":"4","addr":"192.168.0.42","OS-EXT-IPS:type":"fixed","OS-EXT-IPS:port_id":"af1b"},
+                        {"version":"4","addr":"123.45.67.89","OS-EXT-IPS:type":"floating"}
+                    ]
+                }
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/v1/P/cloudservers/detail", server.uri());
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let s = qecs::hwc::ecs::Server::from_raw(&body["servers"][0]).unwrap();
+    assert_eq!(s.az, "ap-southeast-3a");
+    assert_eq!(s.flavor, "s7n.2xlarge.2");
+    assert_eq!(s.private_ip.as_deref(), Some("192.168.0.42"));
+    assert_eq!(s.public_ip.as_deref(), Some("123.45.67.89"));
+    assert_eq!(s.port_id.as_deref(), Some("af1b"));
+    assert_eq!(s.power_state, 1);
+}
+
+#[tokio::test]
+async fn remote_console_response_yields_the_vnc_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/P/cloudservers/s1/remote_console"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "remote_console": { "type": "novnc", "protocol": "vnc",
+                "url": "https://nova-novncproxy.example.myhuaweicloud.com:8002/vnc_auto.html?token=x" }
+        })))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/v1/P/cloudservers/s1/remote_console", server.uri());
+    let body: serde_json::Value = reqwest::Client::new()
+        .post(&url)
+        .json(&serde_json::json!({"remote_console":{"protocol":"vnc","type":"novnc"}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        qecs::hwc::ecs::console_url_from(&body).unwrap(),
+        "https://nova-novncproxy.example.myhuaweicloud.com:8002/vnc_auto.html?token=x"
+    );
+}

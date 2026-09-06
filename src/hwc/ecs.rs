@@ -1,19 +1,94 @@
-//! Elastic Cloud Server - server lifecycle models plus the create + dry-run calls.
+//! Elastic Cloud Server - server lifecycle models plus create + dry-run, and the
+//! get / list / wait / delete / VNC-console read calls with their address helpers.
 use crate::hwc::client::SignedClient;
 use crate::hwc::endpoints::{Service, endpoint_host};
+use crate::hwc::wait::{Poll, PollConfig, poll_until};
+use anyhow::Context;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-#[derive(Debug, Deserialize)]
+/// One ECS server, flattened from HWC's raw response (the `OS-EXT-*` colon keys
+/// make `#[derive(Deserialize)]` painful, so `from_raw` walks the `Value` by hand).
+#[derive(Debug, Clone)]
 pub struct Server {
     pub id: String,
     pub name: String,
     pub status: String,
+    pub az: String,
+    pub flavor: String,
+    pub private_ip: Option<String>,
+    pub public_ip: Option<String>,
+    pub port_id: Option<String>,
+    pub power_state: i32,
+    pub tags: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ServersResp {
-    pub servers: Vec<Server>,
+impl Server {
+    /// Build a `Server` from one `servers[]` element (or the `server` object of a
+    /// get). `id` / `name` / `status` are required; everything else defaults.
+    pub fn from_raw(v: &Value) -> anyhow::Result<Server> {
+        let req = |key: &str| -> anyhow::Result<String> {
+            v.get(key)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .with_context(|| format!("server response missing `{key}`"))
+        };
+        let (private_ip, public_ip, port_id) = parse_addresses(&v["addresses"]);
+        let tags = v["tags"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Server {
+            id: req("id")?,
+            name: req("name")?,
+            status: req("status")?,
+            az: v["OS-EXT-AZ:availability_zone"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            flavor: v["flavor"]["id"].as_str().unwrap_or_default().to_string(),
+            private_ip,
+            public_ip,
+            port_id,
+            power_state: v["OS-EXT-STS:power_state"].as_i64().unwrap_or(0) as i32,
+            tags,
+        })
+    }
+}
+
+/// Walk a server's `addresses` object (keyed by VPC id, each value an array of
+/// entries) and pull out `(private_ip, public_ip, port_id)`. `fixed` entries give
+/// the private IP + port id, `floating` entries give the public IP. First match of
+/// each wins; never panics on `{}` or missing keys.
+pub fn parse_addresses(v: &Value) -> (Option<String>, Option<String>, Option<String>) {
+    let mut private_ip = None;
+    let mut public_ip = None;
+    let mut port_id = None;
+    let Some(by_vpc) = v.as_object() else {
+        return (private_ip, public_ip, port_id);
+    };
+    for entries in by_vpc.values() {
+        let Some(entries) = entries.as_array() else {
+            continue;
+        };
+        for entry in entries {
+            match entry["OS-EXT-IPS:type"].as_str() {
+                Some("fixed") if private_ip.is_none() => {
+                    private_ip = entry["addr"].as_str().map(str::to_string);
+                    port_id = entry["OS-EXT-IPS:port_id"].as_str().map(str::to_string);
+                }
+                Some("floating") if public_ip.is_none() => {
+                    public_ip = entry["addr"].as_str().map(str::to_string);
+                }
+                _ => {}
+            }
+        }
+    }
+    (private_ip, public_ip, port_id)
 }
 
 /// `https://ecs.<region>.myhuaweicloud.com/v1/<project_id>` - the base every
@@ -143,15 +218,177 @@ pub async fn create_server_dry_run(
         .map_err(|e| anyhow::anyhow!(e))
 }
 
+/// `GET {ecs_base}/cloudservers/{id}` -> `{"server":{...}}`.
+pub async fn get_server(
+    c: &SignedClient,
+    region: &str,
+    project_id: &str,
+    id: &str,
+) -> anyhow::Result<Server> {
+    let url = format!("{}/cloudservers/{id}", ecs_base(region, project_id));
+    let resp: Value = c
+        .send_json(reqwest::Method::GET, &url, None)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    Server::from_raw(&resp["server"])
+}
+
+/// `GET {ecs_base}/cloudservers/detail?limit=200` -> `{"servers":[...]}`.
+pub async fn list_servers(
+    c: &SignedClient,
+    region: &str,
+    project_id: &str,
+) -> anyhow::Result<Vec<Server>> {
+    let url = format!(
+        "{}/cloudservers/detail?limit=200",
+        ecs_base(region, project_id)
+    );
+    let resp: Value = c
+        .send_json(reqwest::Method::GET, &url, None)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    resp["servers"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(Server::from_raw)
+        .collect()
+}
+
+/// Poll `get_server` until the server is `ACTIVE`; bail on `ERROR`.
+pub async fn wait_active(
+    c: &SignedClient,
+    region: &str,
+    project_id: &str,
+    id: &str,
+    cfg: &PollConfig,
+) -> anyhow::Result<Server> {
+    poll_until(cfg, &format!("server {id} ACTIVE"), || async {
+        let s = get_server(c, region, project_id, id).await?;
+        Ok(match s.status.as_str() {
+            "ACTIVE" => Poll::Ready(s),
+            "ERROR" => anyhow::bail!("server {id} entered ERROR"),
+            _ => Poll::Pending,
+        })
+    })
+    .await
+}
+
+/// `POST {ecs_base}/cloudservers/delete` (batch) -> async `job_id`.
+pub async fn delete_servers(
+    c: &SignedClient,
+    region: &str,
+    project_id: &str,
+    ids: &[&str],
+) -> anyhow::Result<String> {
+    let url = format!("{}/cloudservers/delete", ecs_base(region, project_id));
+    let body = delete_body(ids);
+    let resp: CreateResp = c
+        .send_json(reqwest::Method::POST, &url, Some(&body))
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    Ok(resp.job_id)
+}
+
+/// `POST {ecs_base}/cloudservers/{id}/remote_console` -> the one-time noVNC URL.
+pub async fn remote_console(
+    c: &SignedClient,
+    region: &str,
+    project_id: &str,
+    id: &str,
+) -> anyhow::Result<String> {
+    let url = format!(
+        "{}/cloudservers/{id}/remote_console",
+        ecs_base(region, project_id)
+    );
+    let body = json!({ "remote_console": { "protocol": "vnc", "type": "novnc" } });
+    let resp: Value = c
+        .send_json(reqwest::Method::POST, &url, Some(&body))
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    console_url_from(&resp)
+}
+
+/// Pure: batch-delete payload with EIP + data-volume cleanup on.
+pub(crate) fn delete_body(ids: &[&str]) -> Value {
+    json!({
+        "servers": ids.iter().map(|id| json!({ "id": id })).collect::<Vec<_>>(),
+        "delete_publicip": true,
+        "delete_volume": true,
+    })
+}
+
+/// Pure: pull `remote_console.url` out of a console response, erroring if absent.
+/// `pub` (not `pub(crate)`) so `tests/hwc_integration.rs` can exercise it against
+/// a mocked HTTP round-trip.
+pub fn console_url_from(v: &Value) -> anyhow::Result<String> {
+    v["remote_console"]["url"]
+        .as_str()
+        .map(str::to_string)
+        .context("remote_console response missing `remote_console.url`")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parses_servers() {
-        let j = r#"{"servers":[{"id":"i-1","name":"qecs-gpu-ab12","status":"ACTIVE"}]}"#;
-        let r: ServersResp = serde_json::from_str(j).unwrap();
-        assert_eq!(r.servers[0].status, "ACTIVE");
+    fn parse_addresses_splits_fixed_and_floating() {
+        let v = serde_json::json!({
+            "vpc-uuid": [
+                {"version":"4","addr":"192.168.0.42","OS-EXT-IPS:type":"fixed","OS-EXT-IPS:port_id":"port-9"},
+                {"version":"4","addr":"123.45.67.89","OS-EXT-IPS:type":"floating"}
+            ]
+        });
+        let (priv_ip, pub_ip, port) = parse_addresses(&v);
+        assert_eq!(priv_ip.as_deref(), Some("192.168.0.42"));
+        assert_eq!(pub_ip.as_deref(), Some("123.45.67.89"));
+        assert_eq!(port.as_deref(), Some("port-9"));
+    }
+
+    #[test]
+    fn parse_addresses_tolerates_empty_object() {
+        assert_eq!(parse_addresses(&serde_json::json!({})), (None, None, None));
+    }
+
+    #[test]
+    fn server_from_raw_flattens_ext_fields() {
+        let raw = serde_json::json!({
+            "id":"s1","name":"qecs-normal-ab12","status":"ACTIVE",
+            "OS-EXT-AZ:availability_zone":"ap-southeast-3a",
+            "OS-EXT-STS:power_state":1,
+            "flavor":{"id":"s7n.2xlarge.2"},
+            "addresses":{}
+        });
+        let s = Server::from_raw(&raw).unwrap();
+        assert_eq!(s.az, "ap-southeast-3a");
+        assert_eq!(s.flavor, "s7n.2xlarge.2");
+        assert_eq!(s.power_state, 1);
+    }
+
+    #[test]
+    fn server_from_raw_errors_without_id() {
+        let raw = serde_json::json!({ "name": "x", "status": "ACTIVE" });
+        assert!(Server::from_raw(&raw).is_err());
+    }
+
+    #[test]
+    fn delete_body_requests_publicip_and_volume_cleanup() {
+        let b = delete_body(&["s1", "s2"]);
+        assert_eq!(b["servers"][1]["id"], "s2");
+        assert_eq!(b["delete_publicip"], true);
+        assert_eq!(b["delete_volume"], true);
+    }
+
+    #[test]
+    fn console_url_from_extracts_url_or_errors() {
+        let ok = serde_json::json!({"remote_console":{"url":"https://x/vnc_auto.html?token=t"}});
+        assert_eq!(
+            console_url_from(&ok).unwrap(),
+            "https://x/vnc_auto.html?token=t"
+        );
+        assert!(console_url_from(&serde_json::json!({"remote_console":{}})).is_err());
     }
 
     /// A spec with no optionals set, EIP off, no tags.
