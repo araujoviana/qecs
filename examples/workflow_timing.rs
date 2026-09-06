@@ -98,7 +98,12 @@ async fn main() -> anyhow::Result<()> {
 
     let resp = phase!("HTTP send (DNS + TLS + request + TTFB)", req.send().await?);
     let status = resp.status();
-    let body = phase!("download response body", resp.bytes().await?);
+    let wire_len = resp
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    let body = phase!("download + decompress response body", resp.bytes().await?);
     let parsed: serde_json::Value = phase!("parse JSON", serde_json::from_slice(&body)?);
 
     let count = parsed
@@ -122,13 +127,17 @@ async fn main() -> anyhow::Result<()> {
         }))
         .collect();
 
+    let wire = wire_len
+        .map(|n| format!("{n} B on the wire"))
+        .unwrap_or_else(|| "wire size unknown".into());
     println!(
-        "\nHTTP {status}  |  {count} flavors  |  {} bytes\n",
+        "\nHTTP {status}  |  {count} flavors  |  {} B decoded  ({wire})\n",
         body.len()
     );
     println!("{}", Table::new(rows).with(Style::rounded()));
     println!(
-        "\nThe network phases dominate; everything qecs does locally is well under a millisecond."
+        "\nThe network phases dominate; everything qecs does locally is well under a millisecond. \
+         Provision-time validation should use `flavors::find_flavor` (filtered, ~1.7 s), not the full list."
     );
     Ok(())
 }
