@@ -11,7 +11,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default)]
 pub struct GlobalArgs {
     /// Credential/config profile name (selects .env.<profile>).
     #[arg(long, global = true)]
@@ -30,6 +30,9 @@ pub struct GlobalArgs {
     /// Override the configured region.
     #[arg(long, global = true)]
     pub region: Option<String>,
+    /// Record telemetry trace to ~/.local/state/qecs/traces/.
+    #[arg(long, global = true)]
+    pub telemetry: bool,
 }
 
 #[derive(Subcommand, Debug)]

@@ -15,6 +15,14 @@ pub struct Config {
     pub env_files: Vec<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelayConfig>,
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct TelemetryConfig {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -79,6 +87,7 @@ impl Default for Config {
             presets: PresetTable::default(),
             env_files: default_env_files(),
             relay: None,
+            telemetry: TelemetryConfig::default(),
         }
     }
 }
@@ -209,5 +218,17 @@ port = 7835
         assert_eq!(relay.r#type, "bore");
         assert_eq!(relay.server.as_deref(), Some("bore.pub"));
         assert_eq!(relay.port, Some(7835));
+    }
+
+    #[test]
+    fn telemetry_defaults_off_and_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("telemetry.toml");
+        std::fs::write(&p, "[telemetry]\nenabled = true\n").unwrap();
+        let cfg = load_config(Some(&p)).unwrap();
+        assert!(cfg.telemetry.enabled);
+
+        let default_cfg = Config::default();
+        assert!(!default_cfg.telemetry.enabled);
     }
 }

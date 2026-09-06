@@ -41,7 +41,7 @@ pub async fn cmd_logs(ctx: &Ctx, args: LogsArgs) -> anyhow::Result<()> {
     if !status.success()
         && let Some(code) = status.code()
     {
-        std::process::exit(code);
+        return Err(crate::error::ExitCode(code).into());
     }
     Ok(())
 }

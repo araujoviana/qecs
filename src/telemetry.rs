@@ -71,6 +71,42 @@ struct Inner {
     warned: AtomicBool,
 }
 
+/// Resolves whether telemetry is enabled: CLI flag wins (true), then env var (QECS_TELEMETRY),
+/// then config file standing setting.
+pub fn resolve_enabled(flag: bool, env: Option<&str>, config_enabled: bool) -> bool {
+    if flag {
+        return true;
+    }
+    match env.map(|s| s.trim().to_ascii_lowercase()) {
+        Some(s) if matches!(s.as_str(), "1" | "true" | "yes" | "on") => true,
+        Some(s) if matches!(s.as_str(), "0" | "false" | "no" | "off") => false,
+        _ => config_enabled,
+    }
+}
+
+/// Formats the stable subcommand name for telemetry run envelope and trace filename.
+pub fn subcommand_label(cmd: &crate::cli::Commands) -> &'static str {
+    use crate::cli::{Commands, ImageAction};
+    match cmd {
+        Commands::Run(_) => "run",
+        Commands::Up(_) => "up",
+        Commands::Shell(_) => "shell",
+        Commands::Ls => "ls",
+        Commands::Info(_) => "info",
+        Commands::Logs(_) => "logs",
+        Commands::Wait(_) => "wait",
+        Commands::Kill(_) => "kill",
+        Commands::Gc => "gc",
+        Commands::Setup => "setup",
+        Commands::Presets => "presets",
+        Commands::Image(a) => match a.action {
+            ImageAction::Build(_) => "image-build",
+            ImageAction::Ls => "image-ls",
+            ImageAction::Delete(_) => "image-delete",
+        },
+    }
+}
+
 /// Canonical phase names (stable identifiers per spec).
 pub const PHASES: &[&str] = &[
     "creds-resolve",
@@ -597,6 +633,16 @@ mod tests {
             .filter(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["kind"] == "run")
             .count();
         assert_eq!(runs, 1, "exactly one run line");
+    }
+
+    #[test]
+    fn resolve_enabled_precedence() {
+        assert!(resolve_enabled(true, Some("0"), false));
+        assert!(resolve_enabled(false, Some("1"), false));
+        assert!(!resolve_enabled(false, Some("off"), true));
+        assert!(resolve_enabled(false, None, true));
+        assert!(resolve_enabled(false, Some("banana"), true));
+        assert!(!resolve_enabled(false, Some("banana"), false));
     }
 
     #[test]

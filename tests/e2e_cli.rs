@@ -187,3 +187,54 @@ fn image_help_exits_zero() {
 fn image_delete_without_id_is_usage_error() {
     qecs().args(["image", "delete"]).assert().failure().code(2);
 }
+
+#[test]
+fn presets_telemetry_writes_one_trace_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    qecs()
+        .args(["presets", "--telemetry"])
+        .env("HOME", tmp.path())
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("QECS_TELEMETRY")
+        .assert()
+        .success();
+
+    let traces_dir = tmp.path().join(".local/state/qecs/traces");
+    assert!(traces_dir.exists(), "traces dir should exist");
+    let entries: Vec<_> = std::fs::read_dir(&traces_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .collect();
+    assert_eq!(entries.len(), 1, "exactly one trace file");
+
+    let content = std::fs::read_to_string(&entries[0]).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    assert!(!lines.is_empty(), "trace has lines");
+    for line in &lines {
+        let _: serde_json::Value = serde_json::from_str(line).expect("valid JSON line");
+    }
+
+    let last: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+    assert_eq!(last["kind"], "run");
+    assert_eq!(last["subcommand"], "presets");
+    assert_eq!(last["exit_code"], 0);
+}
+
+#[test]
+fn presets_without_telemetry_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    qecs()
+        .args(["presets"])
+        .env("HOME", tmp.path())
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("QECS_TELEMETRY")
+        .assert()
+        .success();
+
+    let traces_dir = tmp.path().join(".local/state/qecs/traces");
+    assert!(
+        !traces_dir.exists(),
+        "traces dir should not exist without telemetry"
+    );
+}

@@ -214,7 +214,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     }
 
     if exit_code != 0 {
-        std::process::exit(exit_code);
+        return Err(crate::error::ExitCode(exit_code).into());
     }
 
     Ok(())

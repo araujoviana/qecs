@@ -128,7 +128,7 @@ pub async fn cmd_shell(ctx: &Ctx, args: ShellArgs) -> anyhow::Result<()> {
     if !status.success()
         && let Some(code) = status.code()
     {
-        std::process::exit(code);
+        return Err(crate::error::ExitCode(code).into());
     }
     Ok(())
 }
@@ -153,6 +153,7 @@ mod tests {
             json: false,
             quiet: false,
             verbose: false,
+            telemetry: false,
         };
         Ctx {
             config: Config::default(),
