@@ -1,6 +1,6 @@
 use clap::Parser;
 use qecs::cli::{Cli, Commands};
-use qecs::{error, ui};
+use qecs::{config, error, presets, ui};
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
@@ -22,7 +22,10 @@ fn main() -> std::process::ExitCode {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Commands::Presets => todo_stub("presets"),
+        Commands::Presets => {
+            let cfg = config::load_config(None)?;
+            presets::cmd_presets(&cfg, cli.global.json).await
+        }
         Commands::Setup => todo_stub("setup"),
         Commands::Run(_) => todo_stub("run"),
         Commands::Up(_) => todo_stub("up"),
