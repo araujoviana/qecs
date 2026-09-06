@@ -40,29 +40,8 @@ pub struct RelayConfig {
 fn default_relay_type() -> String {
     "none".into()
 }
-
-impl RelayConfig {
-    /// Generate the effective OpenSSH ProxyCommand string for a target IP and port.
-    pub fn proxy_command_for(&self, ip: &str, port: u16) -> Option<String> {
-        match self.r#type.as_str() {
-            "none" => None,
-            "custom" => self
-                .proxy_command
-                .as_ref()
-                .map(|cmd| cmd.replace("%h", ip).replace("%p", &port.to_string())),
-            "bore" => {
-                let srv = self.server.as_deref().unwrap_or("bore.pub");
-                let rport = self.port.unwrap_or(7835);
-                Some(format!("nc {srv} {rport}"))
-            }
-            "cloudflare" => {
-                let hostname = self.server.as_deref().unwrap_or(ip);
-                Some(format!("cloudflared access ssh --hostname {hostname}"))
-            }
-            _ => None,
-        }
-    }
-}
+// The ProxyCommand / cloud-init mapping for a relay lives on `connect::Relay`
+// (build it with `Relay::from_config`); `RelayConfig` is only the wire format.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -213,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_config_deserialization_and_proxy_command() {
+    fn relay_config_deserializes_from_the_relay_table() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("relay.toml");
         let toml_str = r#"
@@ -229,31 +208,5 @@ port = 7835
         assert_eq!(relay.r#type, "bore");
         assert_eq!(relay.server.as_deref(), Some("bore.pub"));
         assert_eq!(relay.port, Some(7835));
-        assert_eq!(
-            relay.proxy_command_for("1.2.3.4", 22).as_deref(),
-            Some("nc bore.pub 7835")
-        );
-
-        // Test custom ProxyCommand
-        let custom_relay = RelayConfig {
-            r#type: "custom".into(),
-            server: None,
-            port: None,
-            token: None,
-            proxy_command: Some("nc -X 5 -x 127.0.0.1:1080 %h %p".into()),
-        };
-        assert_eq!(
-            custom_relay
-                .proxy_command_for("192.168.1.50", 443)
-                .as_deref(),
-            Some("nc -X 5 -x 127.0.0.1:1080 192.168.1.50 443")
-        );
-
-        // Test none
-        let none_relay = RelayConfig {
-            r#type: "none".into(),
-            ..Default::default()
-        };
-        assert_eq!(none_relay.proxy_command_for("1.2.3.4", 22), None);
     }
 }

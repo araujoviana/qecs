@@ -67,8 +67,8 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         "Waiting for SSH readiness on `{}` ({ip})...",
         vm.name
     ));
-    let relay_cfg = ctx.config.relay.as_ref();
-    let port = wait_for_ssh_ready(&ip, Duration::from_secs(90), relay_cfg).await?;
+    let relay = crate::connect::Relay::from_config(ctx.config.relay.as_ref())?;
+    let port = wait_for_ssh_ready(&ip, Duration::from_secs(90), &relay).await?;
     pb.finish_and_clear();
 
     // Cache port in state store
@@ -77,7 +77,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     updated_vm.connect_port = Some(port);
     let _ = store.upsert(updated_vm.clone());
 
-    let proxy_cmd = relay_cfg.and_then(|r| r.proxy_command_for(&ip, port));
+    let proxy_cmd = relay.proxy_command(&ip, port);
 
     // 6. Pack & upload workdir
     let pb = crate::ui::spinner("Packing and uploading workspace...");
@@ -247,11 +247,11 @@ fn print_dry_run_summary(recipe: &RunRecipe, args: &RunArgs) {
 async fn wait_for_ssh_ready(
     ip: &str,
     timeout: Duration,
-    relay: Option<&crate::config::RelayConfig>,
+    relay: &crate::connect::Relay,
 ) -> anyhow::Result<u16> {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if let Ok(port) = connect::resolve_connection_port_with_relay(ip, None, relay).await {
+        if let Ok(port) = connect::resolve_connection_port_with_relay(ip, None, Some(relay)).await {
             return Ok(port);
         }
         tokio::time::sleep(Duration::from_secs(2)).await;

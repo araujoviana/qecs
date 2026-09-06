@@ -27,14 +27,15 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
         .or_else(|| vm.private_ip.clone())
         .ok_or_else(|| anyhow::anyhow!("VM `{}` has no IP address assigned", vm.name))?;
 
-    let relay_cfg = ctx.config.relay.as_ref();
-    let port = connect::resolve_connection_port_with_relay(&ip, vm.connect_port, relay_cfg).await?;
+    let relay = connect::Relay::from_config(ctx.config.relay.as_ref())?;
+    let port =
+        connect::resolve_connection_port_with_relay(&ip, vm.connect_port, Some(&relay)).await?;
     if vm.connect_port != Some(port) {
         vm.connect_port = Some(port);
         let _ = store.upsert(vm.clone());
     }
 
-    let proxy_cmd = relay_cfg.and_then(|r| r.proxy_command_for(&ip, port));
+    let proxy_cmd = relay.proxy_command(&ip, port);
 
     let pb = crate::ui::spinner(format!(
         "Waiting for job `{}` on `{}`...",

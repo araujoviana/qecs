@@ -15,7 +15,9 @@ pub async fn cmd_logs(ctx: &Ctx, args: LogsArgs) -> anyhow::Result<()> {
         .or_else(|| vm.private_ip.clone())
         .ok_or_else(|| anyhow::anyhow!("VM `{}` has no IP address assigned", vm.name))?;
 
-    let port = connect::resolve_connection_port(&ip, vm.connect_port).await?;
+    let relay = connect::Relay::from_config(ctx.config.relay.as_ref())?;
+    let port =
+        connect::resolve_connection_port_with_relay(&ip, vm.connect_port, Some(&relay)).await?;
     if vm.connect_port != Some(port) {
         vm.connect_port = Some(port);
         let _ = store.upsert(vm);
@@ -27,11 +29,7 @@ pub async fn cmd_logs(ctx: &Ctx, args: LogsArgs) -> anyhow::Result<()> {
         "cat /var/log/cloud-init-output.log"
     };
 
-    let proxy_cmd = ctx
-        .config
-        .relay
-        .as_ref()
-        .and_then(|r| r.proxy_command_for(&ip, port));
+    let proxy_cmd = relay.proxy_command(&ip, port);
 
     let status = connect::exec_remote_command(
         &ip,

@@ -25,15 +25,16 @@ pub async fn probe_ssh_port(ip: &str, port: u16, timeout_duration: Duration) -> 
 }
 
 /// Resolve the working SSH port for an IP (probing 22 then 443, honoring cached port).
-/// If direct ports 22 and 443 are unreachable, but a relay is configured, returns the relay port.
+/// If direct ports 22 and 443 are unreachable but a relay is configured, returns 22:
+/// the VM's own sshd port, which the relay's `ProxyCommand` tunnels the connection to.
 pub async fn resolve_connection_port_with_relay(
     ip: &str,
     cached_port: Option<u16>,
-    relay: Option<&crate::config::RelayConfig>,
+    relay: Option<&crate::connect::Relay>,
 ) -> anyhow::Result<u16> {
     let probe_timeout = Duration::from_secs(3);
 
-    // 1. Try cached port first if known
+    // 1. Try cached port first if known (a cached relay port is 22, so this is safe)
     if let Some(port) = cached_port
         && probe_ssh_port(ip, port, probe_timeout).await
     {
@@ -50,11 +51,12 @@ pub async fn resolve_connection_port_with_relay(
         return Ok(443);
     }
 
-    // 4. Fallback to reverse tunnel / relay if configured
+    // 4. Fallback to reverse tunnel / relay if configured. The ProxyCommand handles
+    //    reaching the relay; ssh still targets the VM's real sshd on 22.
     if let Some(r) = relay
-        && r.r#type != "none"
+        && !matches!(r, crate::connect::Relay::None)
     {
-        return Ok(r.port.unwrap_or(22));
+        return Ok(22);
     }
 
     anyhow::bail!(
@@ -70,7 +72,6 @@ pub async fn resolve_connection_port(ip: &str, cached_port: Option<u16>) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::RelayConfig;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
@@ -113,19 +114,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_falls_back_to_relay_when_direct_ports_fail() {
-        let relay = RelayConfig {
-            r#type: "bore".into(),
-            server: Some("bore.pub".into()),
-            port: Some(2200),
+    async fn resolve_falls_back_to_relay_dialing_the_vm_sshd_port_not_the_relay_port() {
+        let relay = crate::connect::Relay::Bore {
+            server: "bore.pub".into(),
+            port: 2200,
             token: None,
-            proxy_command: None,
         };
 
-        // 127.0.0.1 on ports 22 and 443 are generally not open in test environment, but to be sure we use 127.0.0.2 with unreachable ports or dummy IP
+        // 192.0.2.1 (TEST-NET-1) is unroutable, so direct 22/443 both fail and the
+        // relay path is taken. The returned port is the VM's own sshd port (22),
+        // which the ProxyCommand tunnels to -- not the relay's listen port.
         let res = resolve_connection_port_with_relay("192.0.2.1", None, Some(&relay)).await;
-        // In case 192.0.2.1 immediately fails/times out, it should fall back to relay port 2200
-        assert_eq!(res.unwrap(), 2200);
+        assert_eq!(res.unwrap(), 22);
     }
 
     #[tokio::test]

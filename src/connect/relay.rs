@@ -10,39 +10,42 @@ pub enum Relay {
         port: u16,
         token: Option<String>,
     },
-    Cloudflare {
-        hostname: String,
-    },
     Custom {
         proxy_command: String,
     },
 }
 
 impl Relay {
-    pub fn from_config(cfg: Option<&RelayConfig>) -> Self {
+    pub fn from_config(cfg: Option<&RelayConfig>) -> anyhow::Result<Self> {
         let Some(c) = cfg else {
-            return Relay::None;
+            return Ok(Relay::None);
         };
 
         match c.r#type.as_str() {
-            "bore" => Relay::Bore {
+            "none" => Ok(Relay::None),
+            "bore" => Ok(Relay::Bore {
                 server: c.server.clone().unwrap_or_else(|| "bore.pub".to_string()),
+                // bore assigns/uses a remote listen port on the relay server; the
+                // client's ProxyCommand dials that same port.
                 port: c.port.unwrap_or(7835),
                 token: c.token.clone(),
-            },
-            "cloudflare" => Relay::Cloudflare {
-                hostname: c.server.clone().unwrap_or_default(),
-            },
+            }),
             "custom" => {
-                if let Some(ref cmd) = c.proxy_command {
-                    Relay::Custom {
-                        proxy_command: cmd.clone(),
-                    }
-                } else {
-                    Relay::None
-                }
+                let cmd = c.proxy_command.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "[relay] type = \"custom\" requires `proxy_command` (an OpenSSH ProxyCommand, \
+                         e.g. \"ssh -W %h:%p bastion.example.com\")"
+                    )
+                })?;
+                Ok(Relay::Custom { proxy_command: cmd })
             }
-            _ => Relay::None,
+            "cloudflare" => anyhow::bail!(
+                "[relay] type = \"cloudflare\" is not supported yet (needs a named Cloudflare \
+                 tunnel and `cloudflared` on the VM). Use type = \"bore\" or type = \"custom\"."
+            ),
+            other => anyhow::bail!(
+                "[relay] unknown type = \"{other}\" (expected \"none\", \"bore\", or \"custom\")"
+            ),
         }
     }
 
@@ -55,14 +58,6 @@ impl Relay {
                 port: rport,
                 ..
             } => Some(format!("nc {server} {rport}")),
-            Relay::Cloudflare { hostname } => {
-                let target = if hostname.is_empty() {
-                    ip
-                } else {
-                    hostname.as_str()
-                };
-                Some(format!("cloudflared access ssh --hostname {target}"))
-            }
             Relay::Custom { proxy_command } => Some(
                 proxy_command
                     .replace("%h", ip)
@@ -107,7 +102,7 @@ impl Relay {
 "#
                 ))
             }
-            Relay::Cloudflare { .. } | Relay::Custom { .. } | Relay::None => None,
+            Relay::Custom { .. } | Relay::None => None,
         }
     }
 
@@ -132,7 +127,7 @@ mod tests {
             token: Some("secret123".into()),
             proxy_command: None,
         };
-        let relay = Relay::from_config(Some(&cfg));
+        let relay = Relay::from_config(Some(&cfg)).unwrap();
         assert!(matches!(relay, Relay::Bore { .. }));
         assert_eq!(
             relay.proxy_command("10.0.0.1", 22).as_deref(),
@@ -152,19 +147,49 @@ mod tests {
             token: None,
             proxy_command: Some("ssh -W %h:%p bastion.school.edu".into()),
         };
-        let relay = Relay::from_config(Some(&cfg));
+        let relay = Relay::from_config(Some(&cfg)).unwrap();
         assert_eq!(
-            relay.proxy_command("192.168.0.42", 443).as_deref(),
-            Some("ssh -W 192.168.0.42:443 bastion.school.edu")
+            relay.proxy_command("192.168.0.42", 22).as_deref(),
+            Some("ssh -W 192.168.0.42:22 bastion.school.edu")
         );
         assert_eq!(relay.cloudinit_write_file(), None);
     }
 
     #[test]
     fn none_relay_yields_no_proxy_or_cloudinit() {
-        let relay = Relay::from_config(None);
+        let relay = Relay::from_config(None).unwrap();
         assert_eq!(relay.proxy_command("1.2.3.4", 22), None);
         assert_eq!(relay.cloudinit_write_file(), None);
         assert_eq!(relay.cloudinit_runcmd(), None);
+    }
+
+    #[test]
+    fn cloudflare_relay_is_rejected_until_it_is_actually_supported() {
+        let cfg = RelayConfig {
+            r#type: "cloudflare".into(),
+            server: Some("vm.example.com".into()),
+            ..Default::default()
+        };
+        let err = Relay::from_config(Some(&cfg)).unwrap_err().to_string();
+        assert!(err.contains("cloudflare"));
+    }
+
+    #[test]
+    fn custom_relay_without_proxy_command_is_an_error_not_a_silent_no_op() {
+        let cfg = RelayConfig {
+            r#type: "custom".into(),
+            proxy_command: None,
+            ..Default::default()
+        };
+        assert!(Relay::from_config(Some(&cfg)).is_err());
+    }
+
+    #[test]
+    fn unknown_relay_type_is_an_error_not_a_silent_no_op() {
+        let cfg = RelayConfig {
+            r#type: "wireguard".into(),
+            ..Default::default()
+        };
+        assert!(Relay::from_config(Some(&cfg)).is_err());
     }
 }
