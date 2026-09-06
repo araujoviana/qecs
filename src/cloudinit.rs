@@ -35,8 +35,15 @@ pub fn render_cloudinit(
     ttl_secs: u64,
     idle_timeout_secs: u64,
     needs_gpu: bool,
+    relay: Option<&crate::connect::Relay>,
 ) -> String {
     let ttl_minutes = (ttl_secs / 60).max(1);
+
+    let relay_write_files = relay
+        .and_then(|r| r.cloudinit_write_file())
+        .map(|s| format!("\n{s}"))
+        .unwrap_or_default();
+    let relay_runcmd = relay.and_then(|r| r.cloudinit_runcmd()).unwrap_or_default();
 
     let gpu_write_files = if needs_gpu {
         r#"
@@ -268,20 +275,20 @@ write_files:
 
       [Install]
       WantedBy=timers.target
-{gpu_write_files}
+{gpu_write_files}{relay_write_files}
 runcmd:
   - [systemctl, restart, ssh]
   - [mkdir, -p, /run/qecs]
   - [systemctl, daemon-reload]
   - [systemctl, enable, --now, qecs-guard.timer]
-{gpu_runcmd}  - shutdown -h +{ttl_minutes} "qecs hard TTL guard"
+{gpu_runcmd}{relay_runcmd}  - shutdown -h +{ttl_minutes} "qecs hard TTL guard"
 "#
     )
 }
 
 /// Backward-compatible baseline cloudinit helper.
 pub fn render_base_cloudinit(public_key: &str) -> String {
-    render_cloudinit(public_key, 7200, 1200, false)
+    render_cloudinit(public_key, 7200, 1200, false, None)
 }
 
 #[cfg(test)]
@@ -300,7 +307,7 @@ mod tests {
     #[test]
     fn test_cloudinit_contains_guard_and_systemd_timer() {
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA qecs";
-        let rendered = render_cloudinit(key, 3600, 600, false);
+        let rendered = render_cloudinit(key, 3600, 600, false, None);
 
         assert!(rendered.starts_with("#cloud-config"));
         assert!(rendered.contains(key));
@@ -329,7 +336,7 @@ mod tests {
     #[test]
     fn test_cloudinit_contains_gpu_setup_when_enabled() {
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA qecs";
-        let rendered = render_cloudinit(key, 7200, 1200, true);
+        let rendered = render_cloudinit(key, 7200, 1200, true, None);
 
         // Contains GPU setup script and systemd service
         assert!(rendered.contains("/usr/local/bin/qecs-gpu-setup.sh"));
@@ -347,7 +354,7 @@ mod tests {
         use std::process::{Command, Stdio};
 
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA qecs";
-        let rendered = render_cloudinit(key, 7200, 1200, true);
+        let rendered = render_cloudinit(key, 7200, 1200, true, None);
 
         let mut pos = 0;
         let mut script_count = 0;
@@ -390,5 +397,54 @@ mod tests {
             script_count, 2,
             "should validate both guard and gpu scripts"
         );
+    }
+
+    #[test]
+    fn test_cloudinit_with_bore_relay() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA qecs";
+        let relay = crate::connect::Relay::Bore {
+            server: "bore.pub".to_string(),
+            port: 2200,
+            token: Some("secret123".to_string()),
+        };
+        let rendered = render_cloudinit(key, 3600, 600, false, Some(&relay));
+
+        assert!(rendered.contains("/usr/local/bin/qecs-relay-start.sh"));
+        assert!(rendered.contains("bore local 22 --to bore.pub --port 2200 --secret 'secret123'"));
+        assert!(rendered.contains("- [bash, /usr/local/bin/qecs-relay-start.sh]"));
+
+        // Validate bash syntax of relay script
+        let start = rendered
+            .find("#!/bin/bash\n      set -u\n      LOG=\"/var/log/qecs-relay.log\"")
+            .expect("relay script found");
+        let end = rendered[start..]
+            .find("\n  - path:")
+            .or_else(|| rendered[start..].find("\nruncmd:"))
+            .unwrap_or(rendered[start..].len());
+        let script: String = rendered[start..start + end]
+            .lines()
+            .map(|l| l.trim_start())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut child = Command::new("bash")
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to execute bash -n");
+
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "relay script passed bash -n");
     }
 }

@@ -1,7 +1,6 @@
 //! `qecs wait` command: awaits completion of a detached job, pulls output, and cleans up.
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use colored::Colorize;
@@ -27,11 +26,14 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
         .or_else(|| vm.private_ip.clone())
         .ok_or_else(|| anyhow::anyhow!("VM `{}` has no IP address assigned", vm.name))?;
 
-    let port = connect::resolve_connection_port(&ip, vm.connect_port).await?;
+    let relay_cfg = ctx.config.relay.as_ref();
+    let port = connect::resolve_connection_port_with_relay(&ip, vm.connect_port, relay_cfg).await?;
     if vm.connect_port != Some(port) {
         vm.connect_port = Some(port);
         let _ = store.upsert(vm.clone());
     }
+
+    let proxy_cmd = relay_cfg.and_then(|r| r.proxy_command_for(&ip, port));
 
     let pb = crate::ui::spinner(format!(
         "Waiting for job `{}` on `{}`...",
@@ -44,22 +46,10 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
     let timeout = Duration::from_secs(3600); // 1 hour max wait
 
     let exit_code = loop {
-        let output = Command::new("ssh")
-            .args([
-                "-i",
-                paths.private_key.to_str().unwrap(),
-                "-p",
-                &port.to_string(),
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "IdentitiesOnly=yes",
-                "-o",
-                "LogLevel=ERROR",
-                &format!("ubuntu@{ip}"),
-                poll_cmd,
-            ])
-            .output();
+        let output =
+            connect::build_ssh_command(&ip, port, &paths.private_key, proxy_cmd.as_deref())
+                .arg(poll_cmd)
+                .output();
 
         if let Ok(out) = output
             && out.status.success()
@@ -94,6 +84,7 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
         &ip,
         port,
         &paths.private_key,
+        proxy_cmd.as_deref(),
         "/home/ubuntu/workspace",
         &local_out,
     ) {

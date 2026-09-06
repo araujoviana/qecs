@@ -3,7 +3,7 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::Context;
 use flate2::Compression;
@@ -118,26 +118,14 @@ pub fn upload_workdir(
     ip: &str,
     port: u16,
     key_path: &Path,
+    proxy_command: Option<&str>,
     archive: &[u8],
     remote_dir: &str,
 ) -> anyhow::Result<()> {
     let remote_cmd = format!("mkdir -p '{remote_dir}' && tar -xzf - -C '{remote_dir}'");
 
-    let mut child = Command::new("ssh")
-        .args([
-            "-i",
-            key_path.to_str().unwrap(),
-            "-p",
-            &port.to_string(),
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            "LogLevel=ERROR",
-            &format!("ubuntu@{ip}"),
-            &remote_cmd,
-        ])
+    let mut child = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
+        .arg(&remote_cmd)
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -164,27 +152,15 @@ pub fn download_output(
     ip: &str,
     port: u16,
     key_path: &Path,
+    proxy_command: Option<&str>,
     remote_dir: &str,
     local_out: &Path,
 ) -> anyhow::Result<bool> {
     // Check if remote output dir exists and contains files
     let check_cmd =
         format!("[ -d '{remote_dir}/out' ] && [ \"$(ls -A '{remote_dir}/out' 2>/dev/null)\" ]");
-    let check_status = Command::new("ssh")
-        .args([
-            "-i",
-            key_path.to_str().unwrap(),
-            "-p",
-            &port.to_string(),
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            "LogLevel=ERROR",
-            &format!("ubuntu@{ip}"),
-            &check_cmd,
-        ])
+    let check_status = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
+        .arg(&check_cmd)
         .status()
         .context("checking remote output directory")?;
 
@@ -194,21 +170,8 @@ pub fn download_output(
 
     // Stream tarball back
     let remote_stream_cmd = format!("tar -czf - -C '{remote_dir}/out' .");
-    let mut child = Command::new("ssh")
-        .args([
-            "-i",
-            key_path.to_str().unwrap(),
-            "-p",
-            &port.to_string(),
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            "LogLevel=ERROR",
-            &format!("ubuntu@{ip}"),
-            &remote_stream_cmd,
-        ])
+    let mut child = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
+        .arg(&remote_stream_cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()

@@ -13,6 +13,55 @@ pub struct Config {
     pub credentials: Option<InlineCreds>,
     pub presets: PresetTable,
     pub env_files: Vec<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RelayConfig {
+    /// Relay adapter type: "none" | "bore" | "cloudflare" | "custom"
+    #[serde(default = "default_relay_type")]
+    pub r#type: String,
+    /// Relay server address (e.g. "bore.pub" or custom host)
+    #[serde(default)]
+    pub server: Option<String>,
+    /// Port on the relay server (e.g. 7835 for bore)
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Secret authentication token if required by relay
+    #[serde(default)]
+    pub token: Option<String>,
+    /// Custom ProxyCommand string (e.g. "nc -X 5 -x 127.0.0.1:1080 %h %p")
+    #[serde(default)]
+    pub proxy_command: Option<String>,
+}
+
+fn default_relay_type() -> String {
+    "none".into()
+}
+
+impl RelayConfig {
+    /// Generate the effective OpenSSH ProxyCommand string for a target IP and port.
+    pub fn proxy_command_for(&self, ip: &str, port: u16) -> Option<String> {
+        match self.r#type.as_str() {
+            "none" => None,
+            "custom" => self
+                .proxy_command
+                .as_ref()
+                .map(|cmd| cmd.replace("%h", ip).replace("%p", &port.to_string())),
+            "bore" => {
+                let srv = self.server.as_deref().unwrap_or("bore.pub");
+                let rport = self.port.unwrap_or(7835);
+                Some(format!("nc {srv} {rport}"))
+            }
+            "cloudflare" => {
+                let hostname = self.server.as_deref().unwrap_or(ip);
+                Some(format!("cloudflared access ssh --hostname {hostname}"))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +98,7 @@ impl Default for Config {
             credentials: None,
             presets: PresetTable::default(),
             env_files: default_env_files(),
+            relay: None,
         }
     }
 }
@@ -160,5 +210,50 @@ mod tests {
         let p = dir.path().join("bad.toml");
         std::fs::write(&p, "region = ").unwrap();
         assert!(load_config(Some(&p)).is_err());
+    }
+
+    #[test]
+    fn relay_config_deserialization_and_proxy_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("relay.toml");
+        let toml_str = r#"
+region = "ap-southeast-3"
+[relay]
+type = "bore"
+server = "bore.pub"
+port = 7835
+"#;
+        std::fs::write(&p, toml_str).unwrap();
+        let cfg = load_config(Some(&p)).unwrap();
+        let relay = cfg.relay.expect("relay should be present");
+        assert_eq!(relay.r#type, "bore");
+        assert_eq!(relay.server.as_deref(), Some("bore.pub"));
+        assert_eq!(relay.port, Some(7835));
+        assert_eq!(
+            relay.proxy_command_for("1.2.3.4", 22).as_deref(),
+            Some("nc bore.pub 7835")
+        );
+
+        // Test custom ProxyCommand
+        let custom_relay = RelayConfig {
+            r#type: "custom".into(),
+            server: None,
+            port: None,
+            token: None,
+            proxy_command: Some("nc -X 5 -x 127.0.0.1:1080 %h %p".into()),
+        };
+        assert_eq!(
+            custom_relay
+                .proxy_command_for("192.168.1.50", 443)
+                .as_deref(),
+            Some("nc -X 5 -x 127.0.0.1:1080 192.168.1.50 443")
+        );
+
+        // Test none
+        let none_relay = RelayConfig {
+            r#type: "none".into(),
+            ..Default::default()
+        };
+        assert_eq!(none_relay.proxy_command_for("1.2.3.4", 22), None);
     }
 }

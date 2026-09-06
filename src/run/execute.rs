@@ -4,7 +4,7 @@
 //! background jobs logging to `/home/ubuntu/job.log`.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::Context;
 
@@ -31,6 +31,7 @@ pub fn execute_job_attached(
     ip: &str,
     port: u16,
     key_path: &Path,
+    proxy_command: Option<&str>,
     remote_dir: &str,
     setup_cmds: &[String],
     run_cmd: &str,
@@ -38,21 +39,8 @@ pub fn execute_job_attached(
     let script = build_script(remote_dir, setup_cmds, run_cmd);
     let remote_cmd = format!("bash -c {arg}", arg = shlex_quote(&script));
 
-    let status = Command::new("ssh")
-        .args([
-            "-i",
-            key_path.to_str().unwrap(),
-            "-p",
-            &port.to_string(),
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            "LogLevel=ERROR",
-            &format!("ubuntu@{ip}"),
-            &remote_cmd,
-        ])
+    let status = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
+        .arg(&remote_cmd)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -69,6 +57,7 @@ pub fn execute_job_detached(
     ip: &str,
     port: u16,
     key_path: &Path,
+    proxy_command: Option<&str>,
     remote_dir: &str,
     setup_cmds: &[String],
     run_cmd: &str,
@@ -82,21 +71,8 @@ pub fn execute_job_detached(
         "cat << 'EOF' > /home/ubuntu/run-job.sh\n{script}EOF\nchmod +x /home/ubuntu/run-job.sh && nohup bash /home/ubuntu/run-job.sh > /home/ubuntu/job.log 2>&1 &"
     );
 
-    let status = Command::new("ssh")
-        .args([
-            "-i",
-            key_path.to_str().unwrap(),
-            "-p",
-            &port.to_string(),
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            "LogLevel=ERROR",
-            &format!("ubuntu@{ip}"),
-            &setup_runner_cmd,
-        ])
+    let status = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
+        .arg(&setup_runner_cmd)
         .status()
         .context("spawning detached remote job over SSH")?;
 

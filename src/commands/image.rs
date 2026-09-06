@@ -129,8 +129,11 @@ async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs) -> anyhow::Result<()> 
         "Waiting for SSH readiness on `{}` ({ip})...",
         vm.name
     ));
-    let port = crate::connect::resolve_connection_port(&ip, None).await?;
+    let relay_cfg = ctx.config.relay.as_ref();
+    let port = crate::connect::resolve_connection_port_with_relay(&ip, None, relay_cfg).await?;
     pb.finish_and_clear();
+
+    let proxy_cmd = relay_cfg.and_then(|r| r.proxy_command_for(&ip, port));
 
     // 3. Wait for GPU driver and toolkit installation to complete
     let pb = crate::ui::spinner("Installing NVIDIA drivers and container toolkit (~4-8m)...");
@@ -138,6 +141,7 @@ async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs) -> anyhow::Result<()> 
         &ip,
         port,
         &paths.private_key,
+        proxy_cmd.as_deref(),
         Duration::from_secs(900),
     )
     .await?;

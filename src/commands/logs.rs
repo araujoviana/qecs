@@ -27,7 +27,19 @@ pub async fn cmd_logs(ctx: &Ctx, args: LogsArgs) -> anyhow::Result<()> {
         "cat /var/log/cloud-init-output.log"
     };
 
-    let status = connect::exec_remote_command(&ip, port, &paths.private_key, remote_cmd)?;
+    let proxy_cmd = ctx
+        .config
+        .relay
+        .as_ref()
+        .and_then(|r| r.proxy_command_for(&ip, port));
+
+    let status = connect::exec_remote_command(
+        &ip,
+        port,
+        &paths.private_key,
+        proxy_cmd.as_deref(),
+        remote_cmd,
+    )?;
     if !status.success()
         && let Some(code) = status.code()
     {

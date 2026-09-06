@@ -66,7 +66,8 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         "Waiting for SSH readiness on `{}` ({ip})...",
         vm.name
     ));
-    let port = wait_for_ssh_ready(&ip, Duration::from_secs(90)).await?;
+    let relay_cfg = ctx.config.relay.as_ref();
+    let port = wait_for_ssh_ready(&ip, Duration::from_secs(90), relay_cfg).await?;
     pb.finish_and_clear();
 
     // Cache port in state store
@@ -75,6 +76,8 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     updated_vm.connect_port = Some(port);
     let _ = store.upsert(updated_vm.clone());
 
+    let proxy_cmd = relay_cfg.and_then(|r| r.proxy_command_for(&ip, port));
+
     // 6. Pack & upload workdir
     let pb = crate::ui::spinner("Packing and uploading workspace...");
     let tarball = sync::pack_directory(&recipe.workdir).context("packing workspace")?;
@@ -82,6 +85,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         &ip,
         port,
         &paths.private_key,
+        proxy_cmd.as_deref(),
         &tarball,
         "/home/ubuntu/workspace",
     )
@@ -93,7 +97,14 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         let pb = crate::ui::spinner(
             "Waiting for NVIDIA GPU driver and container toolkit installation (~4-8m)...",
         );
-        wait_for_gpu_ready(&ip, port, &paths.private_key, Duration::from_secs(900)).await?;
+        wait_for_gpu_ready(
+            &ip,
+            port,
+            &paths.private_key,
+            proxy_cmd.as_deref(),
+            Duration::from_secs(900),
+        )
+        .await?;
         pb.finish_and_clear();
         println!(
             "{}",
@@ -109,6 +120,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
             &ip,
             port,
             &paths.private_key,
+            proxy_cmd.as_deref(),
             "/home/ubuntu/workspace",
             &recipe.setup_commands,
             &recipe.run_command,
@@ -143,6 +155,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         &ip,
         port,
         &paths.private_key,
+        proxy_cmd.as_deref(),
         "/home/ubuntu/workspace",
         &recipe.setup_commands,
         &recipe.run_command,
@@ -158,6 +171,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         &ip,
         port,
         &paths.private_key,
+        proxy_cmd.as_deref(),
         "/home/ubuntu/workspace",
         &local_output_dir,
     ) {
@@ -227,10 +241,14 @@ fn print_dry_run_summary(recipe: &RunRecipe, args: &RunArgs) {
     println!("  Keep VM:        {}", args.keep);
 }
 
-async fn wait_for_ssh_ready(ip: &str, timeout: Duration) -> anyhow::Result<u16> {
+async fn wait_for_ssh_ready(
+    ip: &str,
+    timeout: Duration,
+    relay: Option<&crate::config::RelayConfig>,
+) -> anyhow::Result<u16> {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if let Ok(port) = connect::resolve_connection_port(ip, None).await {
+        if let Ok(port) = connect::resolve_connection_port_with_relay(ip, None, relay).await {
             return Ok(port);
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -262,27 +280,15 @@ pub async fn wait_for_gpu_ready(
     ip: &str,
     port: u16,
     key_path: &Path,
+    proxy_command: Option<&str>,
     timeout: Duration,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
     let poll_cmd = "[ -f /run/qecs/gpu.status ] && cat /run/qecs/gpu.status";
 
     while start.elapsed() < timeout {
-        let output = std::process::Command::new("ssh")
-            .args([
-                "-i",
-                key_path.to_str().unwrap(),
-                "-p",
-                &port.to_string(),
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "IdentitiesOnly=yes",
-                "-o",
-                "LogLevel=ERROR",
-                &format!("ubuntu@{ip}"),
-                poll_cmd,
-            ])
+        let output = connect::build_ssh_command(ip, port, key_path, proxy_command)
+            .arg(poll_cmd)
             .output();
 
         if let Ok(out) = output
@@ -293,21 +299,8 @@ pub async fn wait_for_gpu_ready(
                 return Ok(());
             } else if status == "FAILED" {
                 let log_cmd = "tail -n 25 /var/log/qecs-gpu-setup.log 2>/dev/null || true";
-                let log_output = std::process::Command::new("ssh")
-                    .args([
-                        "-i",
-                        key_path.to_str().unwrap(),
-                        "-p",
-                        &port.to_string(),
-                        "-o",
-                        "StrictHostKeyChecking=accept-new",
-                        "-o",
-                        "IdentitiesOnly=yes",
-                        "-o",
-                        "LogLevel=ERROR",
-                        &format!("ubuntu@{ip}"),
-                        log_cmd,
-                    ])
+                let log_output = connect::build_ssh_command(ip, port, key_path, proxy_command)
+                    .arg(log_cmd)
                     .output();
                 let details = if let Ok(l) = log_output {
                     String::from_utf8_lossy(&l.stdout).trim().to_string()
