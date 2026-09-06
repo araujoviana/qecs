@@ -35,9 +35,10 @@ Project-specific context for `qecs`. Read this before making changes.
   `tests/sign_vectors.rs`. **Do not "refactor" it without re-running those vectors.** Quirk:
   `canonical_uri` appends a trailing `/` - that is deliberate HWC behavior, not a bug.
 - **Credential resolution** (first hit wins), in `src/creds.rs`: `--ak/--sk` flags;
-  `QECS_AK/QECS_SK`; `HUAWEICLOUD_SDK_AK/SK`; `HWC_AK/HWC_SK`; config `[credentials]`;
+  `QECS_AK/QECS_SK` (with optional `QECS_SECURITY_TOKEN` / `HWC_SECURITY_TOKEN`);
+  `HUAWEICLOUD_SDK_AK/SK`; `HWC_AK/HWC_SK`; config `[credentials]`;
   `.env`/`.env.<profile>` files (default paths include `~/.config/qecs/.env` and
-  `~/Projetos/python-projs/mcp-hwc/.env`, keys `HWC_AK`/`HWC_SK`/optional `HWC_SECURITY_TOKEN`);
+  `~/Projetos/python-projs/mcp-hwc/.env`, keys `HWC_AK`/`HWC_SK`/optional `QECS_SECURITY_TOKEN`/`HWC_SECURITY_TOKEN`);
   interactive prompt (TTY only, suppressed by `--json`/`--quiet`).
 - **Default region `ap-southeast-3`** (best GPU stock; latency irrelevant for
   upload-once/download-once jobs). Config-overridable; non-GPU work can pin `sa-brazil-1`
@@ -58,6 +59,22 @@ Project-specific context for `qecs`. Read this before making changes.
   `c7.8xlarge.2`/100, gpu `pi2.4xlarge.4`/200, beefy `p2s.8xlarge.8`/300. Ephemeral means
   large-without-consequence, so defaults skew strong. `flavors.rs::flavor_available_in_az`
   validates a flavor is sellable in the target AZ before any create call.
+
+## Environment variables
+
+The rule: every qecs-specific setting is `QECS_<SCREAMING_SNAKE>`, matching its flag and config key. Third-party-compatibility aliases exist only for credentials, are documented as a lower-precedence fallback, and are named after the tool they mimic.
+
+| Canonical | Aliases (creds only, lower precedence) | Meaning |
+|-----------|----------------------------------------|---------|
+| `QECS_AK` / `QECS_SK` | `HUAWEICLOUD_SDK_AK/SK`, `HWC_AK/SK` | access / secret key |
+| `QECS_SECURITY_TOKEN` | `HWC_SECURITY_TOKEN` | STS token (canonical token var) |
+| `QECS_REGION` | - | region, below `--region`, above config |
+| `QECS_PROFILE` | - | `.env.<profile>` selector, = `--profile` |
+| `QECS_TELEMETRY` | - | enable telemetry |
+
+Developer and tooling variables:
+- `QECS_NO_BUMP=1`: bypasses the auto-version bump hook on manual `git commit --amend` (developer / tooling only).
+- `QECS_PROJECT_ID`: overrides project discovery in tests and timing harnesses (test-harness only).
 
 ## Workflow / conventions
 

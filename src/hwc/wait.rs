@@ -143,12 +143,12 @@ mod tests {
     #[tokio::test]
     async fn poll_emits_timeout_outcome() {
         let tmp = tempfile::tempdir().unwrap();
-        let tel = {
-            unsafe {
-                std::env::set_var("HOME", tmp.path());
-                std::env::remove_var("XDG_STATE_HOME");
-            }
-            Telemetry::init(true, "test").expect("init telemetry")
+        let (tel, path) = {
+            let _g = crate::telemetry::env_lock();
+            let _e = crate::telemetry::EnvScope::new(tmp.path());
+            let t = Telemetry::init(true, "test").expect("init telemetry");
+            let p = t.trace_path().to_path_buf();
+            (t, p)
         };
 
         let cfg = PollConfig {
@@ -167,13 +167,7 @@ mod tests {
 
         tel.finish(1);
 
-        let traces_dir = tmp.path().join(".local/state/qecs/traces");
-        let file = std::fs::read_dir(&traces_dir)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .find(|p| p.extension().is_some_and(|x| x == "jsonl"))
-            .expect("one trace file");
-        let body = std::fs::read_to_string(file).unwrap();
+        let body = std::fs::read_to_string(path).unwrap();
         let poll_line: serde_json::Value = body
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
@@ -188,12 +182,12 @@ mod tests {
     #[tokio::test]
     async fn poll_emits_error_outcome() {
         let tmp = tempfile::tempdir().unwrap();
-        let tel = {
-            unsafe {
-                std::env::set_var("HOME", tmp.path());
-                std::env::remove_var("XDG_STATE_HOME");
-            }
-            Telemetry::init(true, "test").expect("init telemetry")
+        let (tel, path) = {
+            let _g = crate::telemetry::env_lock();
+            let _e = crate::telemetry::EnvScope::new(tmp.path());
+            let t = Telemetry::init(true, "test").expect("init telemetry");
+            let p = t.trace_path().to_path_buf();
+            (t, p)
         };
 
         let cfg = PollConfig::default();
@@ -208,13 +202,7 @@ mod tests {
 
         tel.finish(1);
 
-        let traces_dir = tmp.path().join(".local/state/qecs/traces");
-        let file = std::fs::read_dir(&traces_dir)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .find(|p| p.extension().is_some_and(|x| x == "jsonl"))
-            .expect("one trace file");
-        let body = std::fs::read_to_string(file).unwrap();
+        let body = std::fs::read_to_string(path).unwrap();
         let poll_line: serde_json::Value = body
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
@@ -229,12 +217,12 @@ mod tests {
     #[tokio::test]
     async fn poll_emits_event_with_iteration_count() {
         let tmp = tempfile::tempdir().unwrap();
-        let tel = {
-            unsafe {
-                std::env::set_var("HOME", tmp.path());
-                std::env::remove_var("XDG_STATE_HOME");
-            }
-            crate::telemetry::Telemetry::init(true, "test").expect("init telemetry")
+        let (tel, path) = {
+            let _g = crate::telemetry::env_lock();
+            let _e = crate::telemetry::EnvScope::new(tmp.path());
+            let t = Telemetry::init(true, "test").expect("init telemetry");
+            let p = t.trace_path().to_path_buf();
+            (t, p)
         };
 
         let n = AtomicU32::new(0);
@@ -262,13 +250,7 @@ mod tests {
 
         tel.finish(0);
 
-        let traces_dir = tmp.path().join(".local/state/qecs/traces");
-        let file = std::fs::read_dir(&traces_dir)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .find(|p| p.extension().is_some_and(|x| x == "jsonl"))
-            .expect("one trace file");
-        let body = std::fs::read_to_string(file).unwrap();
+        let body = std::fs::read_to_string(path).unwrap();
         let poll_line: serde_json::Value = body
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())

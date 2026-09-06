@@ -458,6 +458,49 @@ impl TelemetryExt for Option<&Telemetry> {
 }
 
 #[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static M: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    M.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+pub(crate) struct EnvScope {
+    home: Option<String>,
+    xdg: Option<String>,
+}
+
+#[cfg(test)]
+impl EnvScope {
+    pub(crate) fn new(home: &std::path::Path) -> Self {
+        let prev = EnvScope {
+            home: std::env::var("HOME").ok(),
+            xdg: std::env::var("XDG_STATE_HOME").ok(),
+        };
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::remove_var("XDG_STATE_HOME");
+        }
+        prev
+    }
+}
+
+#[cfg(test)]
+impl Drop for EnvScope {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.xdg {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -803,44 +846,5 @@ mod tests {
                 })
         };
         digits_dashes(ts, "dddd-dd-ddTdd-dd-ddZ")
-    }
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static M: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        M.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    struct EnvScope {
-        home: Option<String>,
-        xdg: Option<String>,
-    }
-
-    impl EnvScope {
-        fn new(home: &std::path::Path) -> Self {
-            let prev = EnvScope {
-                home: std::env::var("HOME").ok(),
-                xdg: std::env::var("XDG_STATE_HOME").ok(),
-            };
-            unsafe {
-                std::env::set_var("HOME", home);
-                std::env::remove_var("XDG_STATE_HOME");
-            }
-            prev
-        }
-    }
-
-    impl Drop for EnvScope {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.home {
-                    Some(v) => std::env::set_var("HOME", v),
-                    None => std::env::remove_var("HOME"),
-                }
-                match &self.xdg {
-                    Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-                    None => std::env::remove_var("XDG_STATE_HOME"),
-                }
-            }
-        }
     }
 }

@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = phase!("load config", config::load_config(None)?);
 
-    let creds = phase!(
+    let (creds, _source) = phase!(
         "resolve credentials",
         creds::resolve(CredInput {
             flag_ak: None,
