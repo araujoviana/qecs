@@ -71,10 +71,15 @@ pub(crate) struct CreateImageResp {
     pub(crate) job_id: String,
 }
 
-pub(crate) fn gold_images_url(region: &str, platform: Platform) -> String {
+pub(crate) fn gold_images_url(
+    region: &str,
+    platform: Platform,
+    cond_image: Option<&str>,
+) -> String {
     let host = endpoint_host(Service::Ims, region);
+    let cond = cond_image.unwrap_or("__support_kvm=true");
     format!(
-        "https://{host}/v2/cloudimages?__imagetype=gold&__platform={platform}&__os_bit=64&__support_kvm=true&status=active&limit=50"
+        "https://{host}/v2/cloudimages?__imagetype=gold&__platform={platform}&__os_bit=64&{cond}&status=active&limit=50"
     )
 }
 
@@ -95,14 +100,19 @@ pub(crate) fn single_image_url(region: &str, image_id: &str) -> String {
 
 /// Backward compatibility alias.
 pub(crate) fn images_url(region: &str, platform: Platform) -> String {
-    gold_images_url(region, platform)
+    gold_images_url(region, platform, None)
 }
 
 pub(crate) fn pick_newest(images: Vec<RawImage>, _platform: Platform) -> Option<Image> {
     let mut filtered: Vec<_> = images
         .into_iter()
-        .filter(|img| !img.name.contains("Graphic") && !img.name.contains("BareMetal"))
+        .filter(|img| !img.name.contains("BareMetal"))
         .collect();
+
+    // Prefer non-Graphic images if available (e.g. standard headless servers)
+    if filtered.iter().any(|img| !img.name.contains("Graphic")) {
+        filtered.retain(|img| !img.name.contains("Graphic"));
+    }
 
     // Sort by __os_version descending (string sort)
     filtered.sort_by(|a, b| b.os_version.cmp(&a.os_version));
@@ -115,8 +125,9 @@ pub async fn resolve_image(
     c: &SignedClient,
     region: &str,
     platform: Platform,
+    cond_image: Option<&str>,
 ) -> anyhow::Result<Image> {
-    let url = gold_images_url(region, platform);
+    let url = gold_images_url(region, platform, cond_image);
     let resp: ImagesResp = c
         .send_json(reqwest::Method::GET, &url, None)
         .await
@@ -187,6 +198,7 @@ pub async fn resolve_baked_or_gold_image(
     c: &SignedClient,
     region: &str,
     needs_gpu: bool,
+    cond_image: Option<&str>,
     platform: Platform,
     prefer_baked: bool,
 ) -> anyhow::Result<Image> {
@@ -198,7 +210,7 @@ pub async fn resolve_baked_or_gold_image(
         return Ok(img);
     }
 
-    resolve_image(c, region, platform).await
+    resolve_image(c, region, platform, cond_image).await
 }
 
 #[cfg(test)]
@@ -264,10 +276,20 @@ mod tests {
 
     #[test]
     fn images_url_ubuntu_query_string() {
-        let url = gold_images_url("ap-southeast-3", Platform::Ubuntu);
+        let url = gold_images_url("ap-southeast-3", Platform::Ubuntu, None);
         assert_eq!(
             url,
             "https://ims.ap-southeast-3.myhuaweicloud.com/v2/cloudimages?__imagetype=gold&__platform=Ubuntu&__os_bit=64&__support_kvm=true&status=active&limit=50"
+        );
+
+        let gpu_url = gold_images_url(
+            "ap-southeast-3",
+            Platform::Ubuntu,
+            Some("__support_gpu_t4=true"),
+        );
+        assert_eq!(
+            gpu_url,
+            "https://ims.ap-southeast-3.myhuaweicloud.com/v2/cloudimages?__imagetype=gold&__platform=Ubuntu&__os_bit=64&__support_gpu_t4=true&status=active&limit=50"
         );
     }
 

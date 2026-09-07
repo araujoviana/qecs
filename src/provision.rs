@@ -83,6 +83,7 @@ pub fn generate_vm_name(template: &str, preset: &str) -> String {
 }
 
 /// Find the first AZ in `region` where `flavor_id` is sellable.
+/// Returns `(az, cond_image)` where `cond_image` is the image constraint (if any) required by the flavor.
 /// If `strict` is true (e.g. for GPU presets) and no AZ has stock, returns an error.
 pub async fn pick_az(
     client: &crate::hwc::client::SignedClient,
@@ -90,14 +91,15 @@ pub async fn pick_az(
     project_id: &str,
     flavor_id: &str,
     strict: bool,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Option<String>)> {
     // Try typical AZ suffixes: a, b, c, d, e, f
     let candidates = ["a", "b", "c", "d", "e", "f"];
     for suffix in candidates {
         let az = format!("{region}{suffix}");
-        if let Ok(Some(_)) = flavors::find_flavor(client, region, project_id, flavor_id, &az).await
+        if let Ok(Some(flavor)) =
+            flavors::find_flavor(client, region, project_id, flavor_id, &az).await
         {
-            return Ok(az);
+            return Ok((az, flavor.cond_image));
         }
     }
 
@@ -109,7 +111,7 @@ pub async fn pick_az(
     }
 
     // Fall back to first AZ if not found via filter
-    Ok(format!("{region}a"))
+    Ok((format!("{region}a"), None))
 }
 
 /// Orchestrate the provisioning of an ephemeral ECS VM.
@@ -134,7 +136,7 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
     };
 
     // 3. Select target AZ where flavor is in stock (strict validation if GPU required)
-    let az = pick_az(
+    let (az, cond_image) = pick_az(
         &client,
         &region,
         &project.id,
@@ -181,6 +183,7 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
         &client,
         &region,
         resolved.needs_gpu,
+        cond_image.as_deref(),
         Platform::Ubuntu,
         !opts.no_baked_image,
     );
@@ -239,7 +242,7 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
         key_name: "qecs",
         sg_id: &sg.id,
         root_volume_type: "GPSSD",
-        root_volume_gb: resolved.disk_gb,
+        root_volume_gb: resolved.disk_gb.max(img.min_disk),
         user_data_b64: Some(&user_data_b64),
         auto_terminate: Some(&auto_terminate_time),
         eip: true,
@@ -377,7 +380,7 @@ mod tests {
             },
         );
 
-        let az = pick_az(
+        let (az, cond_image) = pick_az(
             &client,
             "ap-southeast-3",
             "test_proj",
@@ -388,6 +391,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(az, "ap-southeast-3a");
+        assert_eq!(cond_image, None);
     }
 
     #[test]

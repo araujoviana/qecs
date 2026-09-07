@@ -29,7 +29,7 @@ async fn discover_project_live() {
 #[tokio::test]
 #[ignore]
 async fn resolve_image_live() {
-    let img = images::resolve_image(&client(), &region(), images::Platform::Ubuntu)
+    let img = images::resolve_image(&client(), &region(), images::Platform::Ubuntu, None)
         .await
         .unwrap();
     eprintln!(

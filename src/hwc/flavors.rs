@@ -18,6 +18,7 @@ pub struct Flavor {
     pub vcpus: String,
     pub ram_mb: u64,
     pub gpu: Option<String>,
+    pub cond_image: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -50,12 +51,14 @@ impl RawFlavor {
                     .unwrap_or_default()
             })
             .filter(|s| !s.is_empty());
+        let cond_image = self.os_extra_specs.get("cond:image").cloned();
         Flavor {
             id: self.id,
             name: self.name,
             vcpus: self.vcpus,
             ram_mb: self.ram,
             gpu,
+            cond_image,
         }
     }
 }
@@ -228,14 +231,13 @@ mod tests {
             {"id":"s7n.2xlarge.2","name":"s7n.2xlarge.2","vcpus":"8","ram":16384,
              "os_extra_specs":{"ecs:performancetype":"normal"}},
             {"id":"pi2.2xlarge.4","name":"pi2.2xlarge.4","vcpus":"8","ram":"32768",
-             "os_extra_specs":{"ecs:performancetype":"gpu","pci_passthrough:gpu_specs":"nvidia-t4:1"}}
+             "os_extra_specs":{"ecs:performancetype":"gpu","pci_passthrough:gpu_specs":"nvidia-t4:1","cond:image":"__support_gpu_t4=true"}}
         ]}"#;
         let mut r: FlavorsResp = serde_json::from_str(j).unwrap();
         assert_eq!(r.flavors[0].ram, 16384);
         assert_eq!(r.flavors[1].ram, 32768);
-        assert_eq!(
-            r.flavors.pop().unwrap().into_flavor().gpu.as_deref(),
-            Some("nvidia-t4:1")
-        );
+        let pi2 = r.flavors.pop().unwrap().into_flavor();
+        assert_eq!(pi2.gpu.as_deref(), Some("nvidia-t4:1"));
+        assert_eq!(pi2.cond_image.as_deref(), Some("__support_gpu_t4=true"));
     }
 }

@@ -2,8 +2,21 @@
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
+const BANNER: &str = r#"
+                      
+  _` |  _ \  __|  __| 
+ (   |  __/ (   \__ \ 
+\__, |\___|\___|____/ 
+    _|                
+"#;
+
 #[derive(Parser, Debug)]
-#[command(name = "qecs", version, about = "Ephemeral Huawei Cloud compute.")]
+#[command(
+    name = "qecs",
+    version,
+    about = "Ephemeral Huawei Cloud compute.",
+    before_help = BANNER
+)]
 pub struct Cli {
     #[command(flatten)]
     pub global: GlobalArgs,
