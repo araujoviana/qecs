@@ -69,13 +69,14 @@ Presets and flavor mappings can be customized in `~/.config/qecs/config.toml`. A
 - `qecs info [VM_ID]`: display full metadata for a VM including VPC, subnet, AZ, and console URL.
 - `qecs logs [VM_ID]`: stream cloud-init initialization logs or background job output (`--follow`).
 - `qecs wait [VM_ID]`: block until a detached background job finishes and optionally retrieve output.
-- `qecs kill [VM_ID]`: delete an active VM and release cloud resources. Use `--all` to terminate all tracked VMs.
+- `qecs kill [VM_ID]` (alias: `qecs down`): delete an active VM and release cloud resources. Use `--all` to terminate all tracked VMs.
 - `qecs gc`: synchronize state with the cloud, detect externally deleted VMs, and purge expired instances.
 
-### Setup & Acceleration
+### Setup & Shell Integration
 - `qecs setup`: interactive credential resolution check and config generation.
 - `qecs presets`: display available presets and active region.
 - `qecs image build`: bake a private IMS image with preinstalled toolchains and GPU drivers for accelerated cold starts.
+- `qecs completion <shell>`: generate shell tab-completion scripts (`bash`, `zsh`, `fish`, `powershell`, `elvish`).
 
 ## Configuration & Environment
 

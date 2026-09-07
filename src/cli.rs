@@ -52,6 +52,7 @@ pub enum Commands {
     /// Block until a detached job finishes.
     Wait(WaitArgs),
     /// Delete a VM (or all of them).
+    #[command(alias = "down")]
     Kill(KillArgs),
     /// Reconcile local state with the cloud; remove orphans.
     Gc,
@@ -61,6 +62,8 @@ pub enum Commands {
     Presets,
     /// Manage and build pre-baked IMS images for accelerated cold starts.
     Image(ImageArgs),
+    /// Generate shell completion script (bash, zsh, fish, powershell, elvish).
+    Completion(CompletionArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -165,6 +168,13 @@ pub struct ImageDeleteArgs {
     pub id: String,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct CompletionArgs {
+    /// Target shell to generate completions for.
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +243,28 @@ mod tests {
             _ => panic!("wrong command"),
         }
         assert!(Cli::try_parse_from(["qecs", "kill"]).is_err());
+    }
+
+    #[test]
+    fn down_alias_resolves_to_kill() {
+        let cli = Cli::try_parse_from(["qecs", "down", "--all"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Kill(KillArgs {
+                all: true,
+                name: None
+            })
+        ));
+    }
+
+    #[test]
+    fn completion_subcommand_parses_shell() {
+        let cli = Cli::try_parse_from(["qecs", "completion", "fish"]).unwrap();
+        if let Commands::Completion(args) = cli.command {
+            assert_eq!(args.shell, clap_complete::Shell::Fish);
+        } else {
+            panic!("expected Completion command");
+        }
     }
 
     #[test]

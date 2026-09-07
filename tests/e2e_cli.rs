@@ -238,3 +238,12 @@ fn presets_without_telemetry_writes_nothing() {
         "traces dir should not exist without telemetry"
     );
 }
+
+#[test]
+fn completion_generates_shell_script() {
+    let assert = qecs().args(["completion", "fish"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("complete -c qecs"));
+    assert!(stdout.contains("run"));
+    assert!(stdout.contains("presets"));
+}

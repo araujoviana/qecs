@@ -105,6 +105,7 @@ pub fn subcommand_label(cmd: &crate::cli::Commands) -> &'static str {
             ImageAction::Ls => "image-ls",
             ImageAction::Delete(_) => "image-delete",
         },
+        Commands::Completion(_) => "completion",
     }
 }
 
