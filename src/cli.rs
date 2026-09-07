@@ -127,7 +127,6 @@ pub struct WaitArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct KillArgs {
-    #[arg(required_unless_present = "all")]
     pub name: Option<String>,
     #[arg(long, conflicts_with = "name")]
     pub all: bool,
@@ -236,13 +235,17 @@ mod tests {
     }
 
     #[test]
-    fn kill_requires_name_or_all() {
+    fn kill_args_parse_none_name_or_all() {
         let cli = Cli::try_parse_from(["qecs", "kill", "--all"]).unwrap();
         match cli.command {
             Commands::Kill(a) => assert!(a.all && a.name.is_none()),
             _ => panic!("wrong command"),
         }
-        assert!(Cli::try_parse_from(["qecs", "kill"]).is_err());
+        let cli = Cli::try_parse_from(["qecs", "kill"]).unwrap();
+        match cli.command {
+            Commands::Kill(a) => assert!(!a.all && a.name.is_none()),
+            _ => panic!("wrong command"),
+        }
     }
 
     #[test]

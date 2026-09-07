@@ -44,35 +44,68 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
             "{}",
             format!("✓ Killed {} VM(s).", ids.len()).green().bold()
         );
-    } else if let Some(name) = &args.name {
-        let record = store.get(name)?;
-        let server_id = match record {
-            Some(r) => r.id,
-            None => {
-                let servers = ecs::list_servers(&client, &region, &project.id).await?;
-                servers
-                    .into_iter()
-                    .find(|s| &s.name == name)
-                    .map(|s| s.id)
-                    .ok_or_else(|| anyhow::anyhow!("VM `{name}` not found in state or cloud"))?
-            }
-        };
-
-        let pb = crate::ui::spinner(format!("Deleting VM `{name}`..."));
-        let job_id = ecs::delete_servers(&client, &region, &project.id, &[&server_id]).await?;
-        jobs::poll_job(
-            &client,
-            Service::Ecs,
-            &region,
-            &project.id,
-            &job_id,
-            &PollConfig::default(),
-            ctx.telemetry.as_ref(),
-        )
-        .await?;
-        let _ = store.remove(name);
-        pb.finish_and_clear();
-        println!("{}", format!("✓ VM `{name}` killed.").green().bold());
+        return Ok(());
     }
+
+    let (server_id, vm_name) = match &args.name {
+        Some(name) => {
+            let record = store.get(name)?;
+            let id = match record {
+                Some(r) => r.id,
+                None => {
+                    let servers = ecs::list_servers(&client, &region, &project.id).await?;
+                    servers
+                        .into_iter()
+                        .find(|s| &s.name == name)
+                        .map(|s| s.id)
+                        .ok_or_else(|| anyhow::anyhow!("VM `{name}` not found in state or cloud"))?
+                }
+            };
+            (id, name.clone())
+        }
+        None => {
+            let records = store.list()?;
+            if records.len() == 1 {
+                let r = &records[0];
+                (r.id.clone(), r.name.clone())
+            } else if records.is_empty() {
+                let servers = ecs::list_servers(&client, &region, &project.id).await?;
+                if servers.len() == 1 {
+                    let s = &servers[0];
+                    (s.id.clone(), s.name.clone())
+                } else if servers.is_empty() {
+                    anyhow::bail!("no active VMs found to kill");
+                } else {
+                    let names: Vec<_> = servers.iter().map(|s| s.name.as_str()).collect();
+                    anyhow::bail!(
+                        "multiple active VMs found ({}). specify a VM name or pass --all",
+                        names.join(", ")
+                    );
+                }
+            } else {
+                let names: Vec<_> = records.iter().map(|r| r.name.as_str()).collect();
+                anyhow::bail!(
+                    "multiple active VMs found ({}). specify a VM name or pass --all",
+                    names.join(", ")
+                );
+            }
+        }
+    };
+
+    let pb = crate::ui::spinner(format!("Deleting VM `{vm_name}`..."));
+    let job_id = ecs::delete_servers(&client, &region, &project.id, &[&server_id]).await?;
+    jobs::poll_job(
+        &client,
+        Service::Ecs,
+        &region,
+        &project.id,
+        &job_id,
+        &PollConfig::default(),
+        ctx.telemetry.as_ref(),
+    )
+    .await?;
+    let _ = store.remove(&vm_name);
+    pb.finish_and_clear();
+    println!("{}", format!("✓ VM `{vm_name}` killed.").green().bold());
     Ok(())
 }
