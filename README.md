@@ -52,24 +52,25 @@ Presets and flavor mappings can be customized in `~/.config/qecs/config.toml`. A
 
 ### Execution & Provisioning
 - `qecs run [PATH]`: package workdir, provision VM, run job, download artifacts, destroy.
-  - `--preset <NAME>`: choose hardware preset (`normal`, `ram`, `compute`, `gpu`, `beefy`).
-  - `--flavor <FLAVOR>`: explicit Huawei Cloud flavor ID override.
-  - `--ttl <DURATION>`: execution time limit before guard terminates the machine (default: `1h`).
-  - `--detach`: submit job in background and exit immediately.
-  - `--keep`: keep the VM alive after job execution completes.
-  - `--output <PATH>`: custom destination directory for remote `./out` artifacts.
-  - `--dry-run`: display resolved detector ladder recipe and configuration without provisioning.
-  - `--telemetry`: emit execution phase and network timing trace.
+  - `-p, --preset <NAME>`: choose hardware preset (`normal`, `ram`, `compute`, `gpu`, `beefy`).
+  - `-f, --flavor <FLAVOR>`: explicit Huawei Cloud flavor ID override.
+  - `-t, --ttl <DURATION>`: execution time limit before guard terminates the machine (default: `1h`).
+  - `-d, --detach`: submit job in background and exit immediately.
+  - `-k, --keep`: keep the VM alive after job execution completes.
+  - `-o, --output <PATH>`: custom destination directory for remote `./out` artifacts.
+  - `-D, --dry-run`: display resolved detector ladder recipe and configuration without provisioning.
+  - `-T, --telemetry`: emit execution phase and network timing trace.
+  - Short boolean flags can be bundled (e.g. `qecs run -dk -p gpu .`).
 - `qecs up`: provision an interactive ephemeral VM and register in local state.
-  - Options: `--preset`, `--name`, `--ttl`, `--dry-run`, `--telemetry`.
+  - Options: `-p, --preset`, `-n, --name`, `-t, --ttl`, `-D, --dry-run`, `-T, --telemetry`.
 - `qecs shell [VM_ID]`: open an SSH shell (or remote VNC console fallback) into an active VM.
 
 ### Inspection & Management
-- `qecs ls`: list tracked VMs with status, IPs, and remaining TTL. Add `--json` for machine-readable output.
+- `qecs ls`: list tracked VMs with status, IPs, and remaining TTL. Add `-j, --json` for machine-readable output.
 - `qecs info [VM_ID]`: display full metadata for a VM including VPC, subnet, AZ, and console URL.
-- `qecs logs [VM_ID]`: stream cloud-init initialization logs or background job output (`--follow`).
+- `qecs logs [VM_ID]`: stream cloud-init initialization logs or background job output (`-f, --follow`).
 - `qecs wait [VM_ID]`: block until a detached background job finishes and optionally retrieve output.
-- `qecs kill [VM_ID]` (alias: `qecs down`): delete an active VM and release cloud resources. Use `--all` to terminate all tracked VMs.
+- `qecs kill [VM_ID]` (alias: `qecs down`): delete an active VM and release cloud resources. Automatically targets your single active VM when omitted. Use `-a, --all` to terminate all tracked VMs.
 - `qecs gc`: synchronize state with the cloud, detect externally deleted VMs, and purge expired instances.
 
 ### Setup & Shell Integration

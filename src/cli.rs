@@ -14,24 +14,24 @@ pub struct Cli {
 #[derive(Args, Debug, Clone, Default)]
 pub struct GlobalArgs {
     /// Credential/config profile name (selects .env.<profile>).
-    #[arg(long, global = true)]
+    #[arg(short = 'P', long, global = true)]
     pub profile: Option<String>,
-    #[arg(long, global = true)]
+    #[arg(short, long, global = true)]
     pub verbose: bool,
-    #[arg(long, global = true)]
+    #[arg(short, long, global = true)]
     pub quiet: bool,
     /// Machine-readable output where supported.
-    #[arg(long, global = true)]
+    #[arg(short, long, global = true)]
     pub json: bool,
     #[arg(long, global = true, hide = true)]
     pub ak: Option<String>,
     #[arg(long, global = true, hide = true)]
     pub sk: Option<String>,
     /// Override the configured region.
-    #[arg(long, global = true)]
+    #[arg(short, long, global = true)]
     pub region: Option<String>,
     /// Record telemetry trace to ~/.local/state/qecs/traces/.
-    #[arg(long, global = true)]
+    #[arg(short = 'T', long, global = true)]
     pub telemetry: bool,
 }
 
@@ -69,19 +69,19 @@ pub enum Commands {
 #[derive(Args, Debug, Clone)]
 pub struct RunArgs {
     pub path: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(short, long)]
     pub preset: Option<String>,
-    #[arg(long)]
+    #[arg(short, long)]
     pub flavor: Option<String>,
-    #[arg(long)]
+    #[arg(short, long)]
     pub ttl: Option<String>,
-    #[arg(long)]
+    #[arg(short, long)]
     pub detach: bool,
-    #[arg(long)]
+    #[arg(short, long)]
     pub keep: bool,
-    #[arg(long)]
+    #[arg(short, long)]
     pub output: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(short = 'D', long)]
     pub dry_run: bool,
     /// Bypass pre-baked private images and use a fresh base gold image.
     #[arg(long)]
@@ -90,13 +90,13 @@ pub struct RunArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct UpArgs {
-    #[arg(long)]
+    #[arg(short, long)]
     pub preset: Option<String>,
-    #[arg(long)]
+    #[arg(short, long)]
     pub name: Option<String>,
-    #[arg(long)]
+    #[arg(short, long)]
     pub ttl: Option<String>,
-    #[arg(long)]
+    #[arg(short = 'D', long)]
     pub dry_run: bool,
     /// Bypass pre-baked private images and use a fresh base gold image.
     #[arg(long)]
@@ -116,7 +116,7 @@ pub struct InfoArgs {
 #[derive(Args, Debug, Clone)]
 pub struct LogsArgs {
     pub target: String,
-    #[arg(long)]
+    #[arg(short, long)]
     pub follow: bool,
 }
 
@@ -128,7 +128,7 @@ pub struct WaitArgs {
 #[derive(Args, Debug, Clone)]
 pub struct KillArgs {
     pub name: Option<String>,
-    #[arg(long, conflicts_with = "name")]
+    #[arg(short, long, conflicts_with = "name")]
     pub all: bool,
 }
 
@@ -151,13 +151,13 @@ pub enum ImageAction {
 #[derive(Args, Debug, Clone)]
 pub struct ImageBuildArgs {
     /// Name for the new baked image (defaults to qecs-gpu-YYYYMMDD-HHMM).
-    #[arg(long)]
+    #[arg(short, long)]
     pub name: Option<String>,
     /// Description for the baked image.
     #[arg(long)]
     pub description: Option<String>,
     /// Keep the builder VM alive after image creation.
-    #[arg(long)]
+    #[arg(short, long)]
     pub keep: bool,
 }
 
@@ -275,6 +275,36 @@ mod tests {
         let cli = Cli::try_parse_from(["qecs", "ls", "--json"]).unwrap();
         assert!(cli.global.json);
         assert!(matches!(cli.command, Commands::Ls));
+    }
+
+    #[test]
+    fn bundled_flags_and_short_options_work() {
+        // Global bundled flags: -v (verbose) + -j (json)
+        // Subcommand short flags: -d (detach) + -k (keep) + -p (preset)
+        let cli = Cli::try_parse_from(["qecs", "-vj", "run", "-dk", "-p", "gpu", "myjob"]).unwrap();
+        assert!(cli.global.verbose);
+        assert!(cli.global.json);
+        match cli.command {
+            Commands::Run(a) => {
+                assert!(a.detach);
+                assert!(a.keep);
+                assert_eq!(a.preset.as_deref(), Some("gpu"));
+                assert_eq!(a.path.unwrap().to_str().unwrap(), "myjob");
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn down_alias_with_short_all_flag() {
+        let cli = Cli::try_parse_from(["qecs", "down", "-a"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Kill(KillArgs {
+                all: true,
+                name: None
+            })
+        ));
     }
 
     #[test]
