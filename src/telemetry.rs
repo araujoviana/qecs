@@ -96,7 +96,7 @@ pub fn subcommand_label(cmd: &crate::cli::Commands) -> &'static str {
         Commands::Info(_) => "info",
         Commands::Logs(_) => "logs",
         Commands::Wait(_) => "wait",
-        Commands::Kill(_) => "kill",
+        Commands::Kill(_) | Commands::Down(_) => "kill",
         Commands::Gc => "gc",
         Commands::Setup => "setup",
         Commands::Presets => "presets",

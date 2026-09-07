@@ -24,7 +24,7 @@ use crate::telemetry::TelemetryExt;
 
 #[derive(Debug, Clone, Default)]
 pub struct ProvisionOptions {
-    pub preset: Option<String>,
+    pub preset: Option<Preset>,
     pub flavor: Option<String>,
     pub name: Option<String>,
     pub ttl: Option<String>,
@@ -121,10 +121,7 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
     let client = ctx.signed();
 
     // 1. Resolve preset & flavor
-    let preset = match &opts.preset {
-        Some(p) => p.parse::<Preset>()?,
-        None => Preset::Normal,
-    };
+    let preset = opts.preset.unwrap_or(Preset::Normal);
     let resolved = presets::resolve(preset, &ctx.config, opts.flavor.as_deref());
 
     // 2. Discover IAM project id

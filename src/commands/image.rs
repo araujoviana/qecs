@@ -13,6 +13,7 @@ use crate::hwc::images;
 use crate::hwc::jobs;
 use crate::hwc::wait::PollConfig;
 use crate::keys;
+use crate::presets::Preset;
 use crate::provision::{self, ProvisionOptions, generate_vm_name};
 use crate::telemetry::TelemetryExt;
 
@@ -106,7 +107,7 @@ async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs) -> anyhow::Result<()> 
     // 1. Provision ephemeral GPU builder instance (force fresh gold image)
     let builder_name = generate_vm_name("qecs-builder-{shortid}", "gpu");
     let opts = ProvisionOptions {
-        preset: Some("gpu".into()),
+        preset: Some(Preset::Gpu),
         flavor: None,
         name: Some(builder_name.clone()),
         ttl: Some("2h".into()),

@@ -4,13 +4,19 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
+#[value(rename_all = "lowercase")]
 pub enum Preset {
+    /// 2 vCPU, 4GB RAM (c7n.large.2) - General purpose ephemeral
     Normal,
+    /// 2 vCPU, 16GB RAM (m7n.large.8) - Memory intensive
     Ram,
+    /// 4 vCPU, 8GB RAM (c7n.xlarge.2) - CPU intensive
     Compute,
+    /// 16 vCPU, 64GB RAM, 1x T4 GPU (pi2.4xlarge.4) - Deep learning & CUDA
     Gpu,
+    /// 32 vCPU, 128GB RAM, 2x T4 GPU (pi2.8xlarge.4) - Heavy ML training
     Beefy,
 }
 

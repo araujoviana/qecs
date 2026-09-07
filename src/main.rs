@@ -83,7 +83,7 @@ async fn run_command(
             let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::info::cmd_info(&ctx, args.clone()).await
         }
-        Commands::Kill(ref args) => {
+        Commands::Kill(ref args) | Commands::Down(ref args) => {
             let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::kill::cmd_kill(&ctx, args.clone()).await
         }
@@ -115,7 +115,35 @@ async fn run_command(
             use clap::CommandFactory;
             let mut cmd = Cli::command();
             clap_complete::generate(args.shell, &mut cmd, "qecs", &mut std::io::stdout());
+            if args.shell == clap_complete::Shell::Fish {
+                print!("{}", fish_enhancements());
+            }
             Ok(())
         }
     }
+}
+
+fn fish_enhancements() -> &'static str {
+    r#"
+# Dynamic VM completion for instance-targeting subcommands
+function __fish_qecs_active_vms
+    set -l state_dir "$XDG_STATE_HOME"
+    if test -z "$state_dir"
+        set state_dir "$HOME/.local/state"
+    end
+    set -l state_file "$state_dir/qecs/vms.json"
+    if test -f "$state_file"
+        string match -rg '"name":\s*"([^"]+)"' < "$state_file" 2>/dev/null
+    end
+    return 0
+end
+
+complete -c qecs -n "__fish_qecs_using_subcommand completion" -f -a "bash elvish fish powershell zsh"
+complete -c qecs -n "__fish_qecs_using_subcommand shell" -f -a "(__fish_qecs_active_vms)"
+complete -c qecs -n "__fish_qecs_using_subcommand info" -f -a "(__fish_qecs_active_vms)"
+complete -c qecs -n "__fish_qecs_using_subcommand logs" -f -a "(__fish_qecs_active_vms)"
+complete -c qecs -n "__fish_qecs_using_subcommand wait" -f -a "(__fish_qecs_active_vms)"
+complete -c qecs -n "__fish_qecs_using_subcommand kill" -f -a "(__fish_qecs_active_vms)"
+complete -c qecs -n "__fish_qecs_using_subcommand down" -f -a "(__fish_qecs_active_vms)"
+"#
 }

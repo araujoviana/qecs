@@ -65,8 +65,9 @@ pub enum Commands {
     /// Block until a detached job finishes.
     Wait(WaitArgs),
     /// Delete a VM (or all of them).
-    #[command(alias = "down")]
     Kill(KillArgs),
+    /// Delete a VM (or all of them) (alias for kill).
+    Down(KillArgs),
     /// Reconcile local state with the cloud; remove orphans.
     Gc,
     /// Write config and validate credentials.
@@ -82,8 +83,8 @@ pub enum Commands {
 #[derive(Args, Debug, Clone)]
 pub struct RunArgs {
     pub path: Option<PathBuf>,
-    #[arg(short, long)]
-    pub preset: Option<String>,
+    #[arg(short, long, value_enum)]
+    pub preset: Option<crate::presets::Preset>,
     #[arg(short, long)]
     pub flavor: Option<String>,
     #[arg(short, long)]
@@ -103,8 +104,8 @@ pub struct RunArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct UpArgs {
-    #[arg(short, long)]
-    pub preset: Option<String>,
+    #[arg(short, long, value_enum)]
+    pub preset: Option<crate::presets::Preset>,
     #[arg(short, long)]
     pub name: Option<String>,
     #[arg(short, long)]
@@ -198,7 +199,7 @@ mod tests {
         match cli.command {
             Commands::Run(a) => {
                 assert_eq!(a.path.unwrap().to_str().unwrap(), "job.py");
-                assert_eq!(a.preset.as_deref(), Some("gpu"));
+                assert_eq!(a.preset, Some(crate::presets::Preset::Gpu));
                 assert!(!a.no_baked_image);
             }
             _ => panic!("wrong command"),
@@ -266,7 +267,10 @@ mod tests {
         let cli = Cli::try_parse_from(["qecs", "down", "--all"]).unwrap();
         assert!(matches!(
             cli.command,
-            Commands::Kill(KillArgs {
+            Commands::Down(KillArgs {
+                all: true,
+                name: None
+            }) | Commands::Kill(KillArgs {
                 all: true,
                 name: None
             })
@@ -301,7 +305,7 @@ mod tests {
             Commands::Run(a) => {
                 assert!(a.detach);
                 assert!(a.keep);
-                assert_eq!(a.preset.as_deref(), Some("gpu"));
+                assert_eq!(a.preset, Some(crate::presets::Preset::Gpu));
                 assert_eq!(a.path.unwrap().to_str().unwrap(), "myjob");
             }
             _ => panic!("wrong command"),
@@ -313,7 +317,10 @@ mod tests {
         let cli = Cli::try_parse_from(["qecs", "down", "-a"]).unwrap();
         assert!(matches!(
             cli.command,
-            Commands::Kill(KillArgs {
+            Commands::Down(KillArgs {
+                all: true,
+                name: None
+            }) | Commands::Kill(KillArgs {
                 all: true,
                 name: None
             })

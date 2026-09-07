@@ -15,7 +15,6 @@ use crate::hwc::iam;
 use crate::hwc::jobs;
 use crate::hwc::wait::PollConfig;
 use crate::keys;
-use crate::presets::Preset;
 use crate::provision::{self, ProvisionOptions};
 use crate::run::detect::{RunRecipe, detect_recipe};
 use crate::run::execute;
@@ -35,17 +34,13 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     }
 
     // 3. Resolve preset & flavor
-    let final_preset = if let Some(ref p) = args.preset {
-        p.parse::<Preset>()?
-    } else {
-        recipe.preset
-    };
+    let final_preset = args.preset.unwrap_or(recipe.preset);
 
     let (paths, _pub_key) = keys::ensure_keypair(None)?;
 
     // 4. Provision VM
     let opts = ProvisionOptions {
-        preset: Some(final_preset.to_string()),
+        preset: Some(final_preset),
         flavor: args.flavor.clone(),
         name: None,
         ttl: args.ttl.clone(),
@@ -251,7 +246,7 @@ fn print_dry_run_summary(recipe: &RunRecipe, args: &RunArgs) {
     println!("  Detector:       {}", recipe.name);
     let preset_str = args
         .preset
-        .as_deref()
+        .map(|p| p.as_str())
         .unwrap_or_else(|| recipe.preset.as_str());
     println!("  Preset:         {}", preset_str);
     if let Some(ref flavor) = args.flavor {

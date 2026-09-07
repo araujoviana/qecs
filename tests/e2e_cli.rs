@@ -253,4 +253,21 @@ fn completion_generates_shell_script() {
     assert!(stdout.contains("complete -c qecs"));
     assert!(stdout.contains("run"));
     assert!(stdout.contains("presets"));
+    assert!(stdout.contains("__fish_qecs_active_vms"));
+    assert!(stdout.contains("down"));
+    assert!(stdout.contains("normal"));
+    assert!(stdout.contains("gpu"));
+    assert!(stdout.contains("bash elvish fish powershell zsh"));
+}
+
+#[test]
+fn completion_generates_down_for_all_shells() {
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        let assert = qecs().args(["completion", shell]).assert().success();
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        assert!(
+            stdout.contains("down"),
+            "shell {shell} completion must include `down` command"
+        );
+    }
 }
