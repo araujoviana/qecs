@@ -55,6 +55,8 @@ pub fn build_ssh_command(
     key_path: &Path,
     proxy_command: Option<&str>,
 ) -> Command {
+    // Evict any stale host key from previous ephemeral VMs using this recycled IP
+    let _ = crate::keys::remove_known_host(ip);
     let args = build_ssh_args(ip, port, key_path, proxy_command);
     let mut cmd = Command::new("ssh");
     cmd.args(&args);

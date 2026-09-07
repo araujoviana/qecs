@@ -90,12 +90,20 @@ pub async fn cmd_shell(ctx: &Ctx, args: ShellArgs) -> anyhow::Result<()> {
         .or_else(|| vm.private_ip.clone())
         .ok_or_else(|| anyhow::anyhow!("VM `{}` has no IP address assigned", vm.name))?;
 
+    let _ = keys::remove_known_host(&ip);
     let relay = connect::Relay::from_config(ctx.config.relay.as_ref())?;
 
     let pb = crate::ui::spinner(format!("Connecting to `{}` ({ip})...", vm.name));
-    let port = match connect::resolve_connection_port_with_relay(&ip, vm.connect_port, Some(&relay))
-        .await
-    {
+    let probe_res =
+        match connect::resolve_connection_port_with_relay(&ip, vm.connect_port, Some(&relay)).await
+        {
+            Ok(p) => Ok(p),
+            Err(_) => {
+                connect::wait_for_ssh_ready(&ip, std::time::Duration::from_secs(30), &relay).await
+            }
+        };
+
+    let port = match probe_res {
         Ok(p) => {
             pb.finish_and_clear();
             p

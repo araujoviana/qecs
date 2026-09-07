@@ -63,6 +63,8 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         .or_else(|| vm.private_ip.clone())
         .ok_or_else(|| anyhow::anyhow!("VM `{}` has no IP address assigned", vm.name))?;
 
+    let _ = keys::remove_known_host(&ip);
+
     // 5. Await SSH readiness
     let pb = crate::ui::spinner(format!(
         "Waiting for SSH readiness on `{}` ({ip})...",
@@ -71,7 +73,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     let relay = crate::connect::Relay::from_config(ctx.config.relay.as_ref())?;
     let port = {
         let _p = ctx.telemetry.phase("ssh-probe");
-        wait_for_ssh_ready(&ip, Duration::from_secs(90), &relay).await?
+        connect::wait_for_ssh_ready(&ip, Duration::from_secs(90), &relay).await?
     };
     pb.finish_and_clear();
 
@@ -267,21 +269,6 @@ fn print_dry_run_summary(recipe: &RunRecipe, args: &RunArgs) {
     println!("  Keep VM:        {}", args.keep);
 }
 
-async fn wait_for_ssh_ready(
-    ip: &str,
-    timeout: Duration,
-    relay: &crate::connect::Relay,
-) -> anyhow::Result<u16> {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if let Ok(port) = connect::resolve_connection_port_with_relay(ip, None, Some(relay)).await {
-            return Ok(port);
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-    anyhow::bail!("timed out waiting for SSH to become ready on {ip}")
-}
-
 pub async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Result<()> {
     let _p = ctx.telemetry.phase("destroy");
     let region = ctx.region();
@@ -301,6 +288,14 @@ pub async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Resul
     .await;
 
     let store = StateStore::open()?;
+    if let Ok(Some(r)) = store.get(name) {
+        if let Some(ip) = &r.eip {
+            let _ = keys::remove_known_host(ip);
+        }
+        if let Some(ip) = &r.private_ip {
+            let _ = keys::remove_known_host(ip);
+        }
+    }
     let _ = store.remove(name);
     Ok(())
 }

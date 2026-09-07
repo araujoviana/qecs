@@ -15,7 +15,7 @@ pub async fn probe_ssh_port(ip: &str, port: u16, timeout_duration: Duration) -> 
     // Verify SSH banner (e.g. "SSH-2.0-OpenSSH...")
     let mut buf = [0u8; 64];
     let read_fut = stream.read(&mut buf);
-    match timeout(Duration::from_millis(1500), read_fut).await {
+    match timeout(Duration::from_millis(3000), read_fut).await {
         Ok(Ok(n)) if n > 0 => {
             let banner = String::from_utf8_lossy(&buf[..n]);
             banner.starts_with("SSH-")
@@ -67,6 +67,22 @@ pub async fn resolve_connection_port_with_relay(
 /// Resolve the working SSH port for an IP (probing 22 then 443, honoring cached port).
 pub async fn resolve_connection_port(ip: &str, cached_port: Option<u16>) -> anyhow::Result<u16> {
     resolve_connection_port_with_relay(ip, cached_port, None).await
+}
+
+/// Repeatedly probe SSH on `ip` until it responds or `timeout` expires.
+pub async fn wait_for_ssh_ready(
+    ip: &str,
+    timeout: Duration,
+    relay: &crate::connect::Relay,
+) -> anyhow::Result<u16> {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(port) = resolve_connection_port_with_relay(ip, None, Some(relay)).await {
+            return Ok(port);
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    anyhow::bail!("timed out waiting for SSH to become ready on {ip}")
 }
 
 #[cfg(test)]

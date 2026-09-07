@@ -39,6 +39,12 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
 
         for r in &records {
             let _ = store.remove(&r.name);
+            if let Some(ip) = &r.eip {
+                let _ = crate::keys::remove_known_host(ip);
+            }
+            if let Some(ip) = &r.private_ip {
+                let _ = crate::keys::remove_known_host(ip);
+            }
         }
         println!(
             "{}",
@@ -104,6 +110,14 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
         ctx.telemetry.as_ref(),
     )
     .await?;
+    if let Ok(Some(r)) = store.get(&vm_name) {
+        if let Some(ip) = &r.eip {
+            let _ = crate::keys::remove_known_host(ip);
+        }
+        if let Some(ip) = &r.private_ip {
+            let _ = crate::keys::remove_known_host(ip);
+        }
+    }
     let _ = store.remove(&vm_name);
     pb.finish_and_clear();
     println!("{}", format!("✓ VM `{vm_name}` killed.").green().bold());

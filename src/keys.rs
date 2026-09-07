@@ -30,6 +30,49 @@ pub fn qecs_known_hosts_path() -> PathBuf {
         .join("known_hosts")
 }
 
+/// Remove any entries for `ip` from the given `known_hosts` file.
+pub fn remove_known_host_from_path(path: &Path, ip: &str) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(path)?;
+    let mut modified = false;
+    let new_lines: Vec<&str> = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return true;
+            }
+            let first_token = trimmed.split_whitespace().next().unwrap_or_default();
+            let matches_ip = first_token == ip
+                || first_token.starts_with(&format!("{ip},"))
+                || first_token.starts_with(&format!("[{ip}]:"));
+            if matches_ip {
+                modified = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    if modified {
+        let mut out = new_lines.join("\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        std::fs::write(path, out)?;
+    }
+    Ok(())
+}
+
+/// Remove any entries for `ip` from `~/.config/qecs/known_hosts` so recycled IPs
+/// never cause a "REMOTE HOST IDENTIFICATION HAS CHANGED" verification failure.
+pub fn remove_known_host(ip: &str) -> std::io::Result<()> {
+    remove_known_host_from_path(&qecs_known_hosts_path(), ip)
+}
+
 /// Ensure that the dedicated `id_qecs` ed25519 keypair exists in `key_dir`.
 /// If missing, generate it via `ssh-keygen`. Returns the paths and the public key content.
 pub fn ensure_keypair(key_dir: Option<&Path>) -> anyhow::Result<(KeyPairPaths, String)> {
@@ -97,5 +140,25 @@ mod tests {
         let (paths2, pub_key2) = ensure_keypair(Some(temp.path())).unwrap();
         assert_eq!(paths.private_key, paths2.private_key);
         assert_eq!(pub_key, pub_key2);
+    }
+
+    #[test]
+    fn remove_known_host_removes_matching_ips_and_ports() {
+        let temp = tempfile::tempdir().unwrap();
+        let kh = temp.path().join("known_hosts");
+        let initial = "\
+# comment
+110.238.107.84 ssh-ed25519 AAAAC3_OLD_KEY
+[110.238.107.84]:443 ssh-ed25519 AAAAC3_OLD_KEY_443
+1.2.3.4 ssh-ed25519 AAAAC3_OTHER_HOST
+";
+        std::fs::write(&kh, initial).unwrap();
+
+        remove_known_host_from_path(&kh, "110.238.107.84").unwrap();
+
+        let updated = std::fs::read_to_string(&kh).unwrap();
+        assert!(!updated.contains("110.238.107.84"));
+        assert!(updated.contains("1.2.3.4 ssh-ed25519 AAAAC3_OTHER_HOST"));
+        assert!(updated.contains("# comment"));
     }
 }

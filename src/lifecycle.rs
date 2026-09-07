@@ -84,6 +84,12 @@ pub async fn reconcile_and_purge(ctx: &Ctx) -> anyhow::Result<GcStats> {
     for rec in &local_records {
         if !cloud_servers.iter().any(|s| s.id == rec.id) {
             store.remove(&rec.name)?;
+            if let Some(ip) = &rec.eip {
+                let _ = crate::keys::remove_known_host(ip);
+            }
+            if let Some(ip) = &rec.private_ip {
+                let _ = crate::keys::remove_known_host(ip);
+            }
             stats.removed_from_state.push(rec.name.clone());
         }
     }
