@@ -151,7 +151,10 @@ pub struct PhaseGuard {
 }
 
 impl PhaseGuard {
-    pub fn fail(&mut self, e: &anyhow::Error) {
+    /// Mark this phase as failed, recording the first line of `e` (truncated) as
+    /// the trace `err`. Accepts anything `Display` so `anyhow::Error`, `io::Error`
+    /// and `&str` all work.
+    pub fn fail<E: std::fmt::Display + ?Sized>(&mut self, e: &E) {
         self.ok = false;
         self.err = Some(truncate_err(&e.to_string(), 200));
     }
@@ -293,6 +296,37 @@ impl Telemetry {
         PHASE.scope(name, fut).await
     }
 
+    /// Run a fallible async step as its own phase. Enters the `PHASE` task-local so
+    /// every `hwc_call` made inside `fut` is attributed to `name`, and records
+    /// `ok:false` with the error head if `fut` resolves to `Err`.
+    pub async fn phase_try<F, T, E>(&self, name: &'static str, fut: F) -> Result<T, E>
+    where
+        F: std::future::Future<Output = Result<T, E>>,
+        E: std::fmt::Display,
+    {
+        let mut guard = self.phase(name);
+        let out = PHASE.scope(name, fut).await;
+        if let Err(e) = &out {
+            guard.fail(e);
+        }
+        out
+    }
+
+    /// Run a fallible synchronous step as its own phase, recording `ok:false` with
+    /// the error head on `Err`.
+    pub fn phase_sync<F, T, E>(&self, name: &'static str, f: F) -> Result<T, E>
+    where
+        F: FnOnce() -> Result<T, E>,
+        E: std::fmt::Display,
+    {
+        let mut guard = self.phase(name);
+        let out = f();
+        if let Err(e) = &out {
+            guard.fail(e);
+        }
+        out
+    }
+
     fn emit(&self, kind: &str, body: Value) {
         let seq = self.inner.seq.fetch_add(1, Ordering::Relaxed);
         let mut obj = serde_json::Map::new();
@@ -396,6 +430,18 @@ pub trait TelemetryExt {
     fn phase_async<F, T>(&self, name: &'static str, fut: F) -> impl std::future::Future<Output = T>
     where
         F: std::future::Future<Output = T>;
+    fn phase_try<F, T, E>(
+        &self,
+        name: &'static str,
+        fut: F,
+    ) -> impl std::future::Future<Output = Result<T, E>>
+    where
+        F: std::future::Future<Output = Result<T, E>>,
+        E: std::fmt::Display;
+    fn phase_sync<F, T, E>(&self, name: &'static str, f: F) -> Result<T, E>
+    where
+        F: FnOnce() -> Result<T, E>,
+        E: std::fmt::Display;
 }
 
 impl TelemetryExt for Option<Telemetry> {
@@ -426,6 +472,26 @@ impl TelemetryExt for Option<Telemetry> {
             None => fut.await,
         }
     }
+    async fn phase_try<F, T, E>(&self, name: &'static str, fut: F) -> Result<T, E>
+    where
+        F: std::future::Future<Output = Result<T, E>>,
+        E: std::fmt::Display,
+    {
+        match self {
+            Some(t) => t.phase_try(name, fut).await,
+            None => fut.await,
+        }
+    }
+    fn phase_sync<F, T, E>(&self, name: &'static str, f: F) -> Result<T, E>
+    where
+        F: FnOnce() -> Result<T, E>,
+        E: std::fmt::Display,
+    {
+        match self {
+            Some(t) => t.phase_sync(name, f),
+            None => f(),
+        }
+    }
 }
 
 impl TelemetryExt for Option<&Telemetry> {
@@ -454,6 +520,26 @@ impl TelemetryExt for Option<&Telemetry> {
         match self {
             Some(t) => t.phase_async(name, fut).await,
             None => fut.await,
+        }
+    }
+    async fn phase_try<F, T, E>(&self, name: &'static str, fut: F) -> Result<T, E>
+    where
+        F: std::future::Future<Output = Result<T, E>>,
+        E: std::fmt::Display,
+    {
+        match self {
+            Some(t) => t.phase_try(name, fut).await,
+            None => fut.await,
+        }
+    }
+    fn phase_sync<F, T, E>(&self, name: &'static str, f: F) -> Result<T, E>
+    where
+        F: FnOnce() -> Result<T, E>,
+        E: std::fmt::Display,
+    {
+        match self {
+            Some(t) => t.phase_sync(name, f),
+            None => f(),
         }
     }
 }
@@ -780,6 +866,65 @@ mod tests {
         assert!(t.phase("x").is_none());
         let val = t.phase_async("x", async { 42 }).await;
         assert_eq!(val, 42);
+        let ok: Result<i32, String> = t.phase_try("x", async { Ok(7) }).await;
+        assert_eq!(ok.unwrap(), 7);
+        let s: Result<i32, String> = t.phase_sync("x", || Ok(9));
+        assert_eq!(s.unwrap(), 9);
+    }
+
+    #[tokio::test]
+    async fn phase_try_attributes_phase_and_records_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = {
+            let _g = env_lock();
+            let _e = EnvScope::new(tmp.path());
+            Telemetry::init(true, "run").unwrap()
+        };
+
+        // Ok path: task-local is set inside the future, cleared after.
+        let seen: Result<Option<&'static str>, String> = t
+            .phase_try("wait-active", async { Ok(current_phase()) })
+            .await;
+        assert_eq!(seen.unwrap(), Some("wait-active"));
+        assert_eq!(current_phase(), None);
+
+        // Err path: phase is recorded ok:false with the error head.
+        let failed: Result<(), anyhow::Error> = t
+            .phase_try("create-ecs", async {
+                anyhow::bail!("HWC 403 Forbidden\ndetail line")
+            })
+            .await;
+        assert!(failed.is_err());
+        t.finish(1);
+
+        let body = std::fs::read_to_string(single_trace(tmp.path())).unwrap();
+        let create: serde_json::Value = body
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .find(|v: &serde_json::Value| v["name"] == "create-ecs")
+            .expect("create-ecs phase event");
+        assert_eq!(create["kind"], "phase");
+        assert_eq!(create["ok"], false);
+        assert_eq!(create["err"], "HWC 403 Forbidden");
+    }
+
+    #[test]
+    fn phase_sync_records_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = env_lock();
+        let _e = EnvScope::new(tmp.path());
+
+        let t = Telemetry::init(true, "run").unwrap();
+        let r: Result<(), anyhow::Error> =
+            t.phase_sync("workdir-pack", || anyhow::bail!("tar: permission denied"));
+        assert!(r.is_err());
+        t.finish(1);
+
+        let body = std::fs::read_to_string(single_trace(tmp.path())).unwrap();
+        let l0: serde_json::Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+        assert_eq!(l0["name"], "workdir-pack");
+        assert_eq!(l0["ok"], false);
+        assert_eq!(l0["err"], "tar: permission denied");
     }
 
     #[test]

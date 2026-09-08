@@ -17,16 +17,15 @@ impl Ctx {
         let allow_prompt = !cli.global.json && !cli.global.quiet;
         let env_profile = std::env::var("QECS_PROFILE").ok();
         let profile = cli.global.profile.as_deref().or(env_profile.as_deref());
-        let (creds, cred_source) = {
-            let _p = telemetry.phase("creds-resolve");
+        let (creds, cred_source) = telemetry.phase_sync("creds-resolve", || {
             creds::resolve(CredInput {
                 flag_ak: cli.global.ak.as_deref(),
                 flag_sk: cli.global.sk.as_deref(),
                 profile,
                 config: &config,
                 allow_prompt,
-            })?
-        };
+            })
+        })?;
         telemetry.set_meta(|m| m.cred_source = Some(cred_source.label()));
         let http = reqwest::Client::builder()
             .user_agent(concat!("qecs/", env!("CARGO_PKG_VERSION")))

@@ -158,37 +158,39 @@ async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs) -> anyhow::Result<()> 
     let pb = crate::ui::spinner(format!(
         "Creating IMS system image `{image_name}` from instance..."
     ));
-    let job_res = {
-        let _p = ctx.telemetry.phase("image-create");
-        let job_id = images::create_image_from_server(
-            &client,
-            &region,
-            &vm.id,
-            &image_name,
-            args.description.as_deref(),
-        )
-        .await
-        .context("requesting IMS system image creation")?;
+    let job_res = ctx
+        .telemetry
+        .phase_try("image-create", async {
+            let job_id = images::create_image_from_server(
+                &client,
+                &region,
+                &vm.id,
+                &image_name,
+                args.description.as_deref(),
+            )
+            .await
+            .context("requesting IMS system image creation")?;
 
-        let poll_cfg = PollConfig {
-            interval: Duration::from_secs(5),
-            max_interval: Duration::from_secs(10),
-            timeout: Duration::from_secs(900),
-        };
+            let poll_cfg = PollConfig {
+                interval: Duration::from_secs(5),
+                max_interval: Duration::from_secs(10),
+                timeout: Duration::from_secs(900),
+            };
 
-        let project = crate::hwc::iam::discover_project(&client, &region).await?;
-        jobs::poll_job(
-            &client,
-            Service::Ims,
-            &region,
-            &project.id,
-            &job_id,
-            &poll_cfg,
-            ctx.telemetry.as_ref(),
-        )
-        .await
-        .context("waiting for IMS image creation job to complete")?
-    };
+            let project = crate::hwc::iam::discover_project(&client, &region).await?;
+            jobs::poll_job(
+                &client,
+                Service::Ims,
+                &region,
+                &project.id,
+                &job_id,
+                &poll_cfg,
+                ctx.telemetry.as_ref(),
+            )
+            .await
+            .context("waiting for IMS image creation job to complete")
+        })
+        .await?;
     pb.finish_and_clear();
 
     let created_image_id = job_res

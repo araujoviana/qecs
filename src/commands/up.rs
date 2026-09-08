@@ -28,15 +28,17 @@ pub async fn cmd_up(ctx: &Ctx, args: UpArgs) -> anyhow::Result<()> {
                     vm.name
                 ));
                 let relay = crate::connect::Relay::from_config(ctx.config.relay.as_ref())?;
-                let port = {
-                    let _p = ctx.telemetry.phase("ssh-probe");
-                    crate::connect::wait_for_ssh_ready(
-                        ip,
-                        std::time::Duration::from_secs(90),
-                        &relay,
+                let port = ctx
+                    .telemetry
+                    .phase_try(
+                        "ssh-probe",
+                        crate::connect::wait_for_ssh_ready(
+                            ip,
+                            std::time::Duration::from_secs(90),
+                            &relay,
+                        ),
                     )
-                    .await
-                };
+                    .await;
                 pb_ssh.finish_and_clear();
 
                 if let Ok(port) = port {

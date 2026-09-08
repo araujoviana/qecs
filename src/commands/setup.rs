@@ -30,10 +30,10 @@ pub async fn cmd_setup(ctx: &Ctx) -> anyhow::Result<()> {
     let region = ctx.region();
     let client = ctx.signed();
     let pb = crate::ui::spinner(format!("Validating credentials in region `{region}`..."));
-    let project = {
-        let _p = ctx.telemetry.phase("iam-project");
-        iam::discover_project(&client, &region).await?
-    };
+    let project = ctx
+        .telemetry
+        .phase_try("iam-project", iam::discover_project(&client, &region))
+        .await?;
     pb.finish_and_clear();
 
     println!(

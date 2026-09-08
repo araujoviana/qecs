@@ -111,8 +111,7 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
     // Pull output artifacts
     let local_out = PathBuf::from("./out");
     let pb = crate::ui::spinner("Checking for output artifacts...");
-    let dl_res = {
-        let _p = ctx.telemetry.phase("output-download");
+    let dl_res = ctx.telemetry.phase_sync("output-download", || {
         sync::download_output(
             &ip,
             port,
@@ -122,7 +121,7 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
             &output_subdir,
             &local_out,
         )
-    };
+    });
     match dl_res {
         Ok(true) => {
             pb.finish_and_clear();
@@ -145,25 +144,33 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
 
     // Auto-destroy VM
     let pb = crate::ui::spinner(format!("Tearing down VM `{}`...", vm.name));
-    {
-        let _p = ctx.telemetry.phase("destroy");
-        let region = ctx.region();
-        let client = ctx.signed();
-        let project = iam::discover_project(&client, &region).await?;
+    ctx.telemetry
+        .phase_try("destroy", async {
+            let region = ctx.region();
+            let client = ctx.signed();
+            let project = iam::discover_project(&client, &region).await?;
 
-        let job_id = ecs::delete_servers(&client, &region, &project.id, &[&vm.id]).await?;
-        let _ = jobs::poll_job(
-            &client,
-            Service::Ecs,
-            &region,
-            &project.id,
-            &job_id,
-            &PollConfig::default(),
-            ctx.telemetry.as_ref(),
-        )
-        .await;
-        let _ = store.remove(&vm.name);
-    }
+            let job_id = ecs::delete_servers(&client, &region, &project.id, &[&vm.id]).await?;
+            let _ = jobs::poll_job(
+                &client,
+                Service::Ecs,
+                &region,
+                &project.id,
+                &job_id,
+                &PollConfig::default(),
+                ctx.telemetry.as_ref(),
+            )
+            .await;
+            let _ = store.remove(&vm.name);
+            if let Some(ip) = &vm.eip {
+                let _ = keys::remove_known_host(ip);
+            }
+            if let Some(ip) = &vm.private_ip {
+                let _ = keys::remove_known_host(ip);
+            }
+            anyhow::Ok(())
+        })
+        .await?;
     pb.finish_and_clear();
     println!(
         "{}",

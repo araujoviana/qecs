@@ -66,10 +66,13 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         vm.name
     ));
     let relay = crate::connect::Relay::from_config(ctx.config.relay.as_ref())?;
-    let port = {
-        let _p = ctx.telemetry.phase("ssh-probe");
-        connect::wait_for_ssh_ready(&ip, Duration::from_secs(90), &relay).await?
-    };
+    let port = ctx
+        .telemetry
+        .phase_try(
+            "ssh-probe",
+            connect::wait_for_ssh_ready(&ip, Duration::from_secs(90), &relay),
+        )
+        .await?;
     pb.finish_and_clear();
 
     // Cache port in state store
@@ -82,12 +85,10 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
 
     // 6. Pack & upload workdir
     let pb = crate::ui::spinner("Packing and uploading workspace...");
-    let tarball = {
-        let _p = ctx.telemetry.phase("workdir-pack");
-        sync::pack_directory(&recipe.workdir).context("packing workspace")?
-    };
-    {
-        let _p = ctx.telemetry.phase("workdir-upload");
+    let tarball = ctx.telemetry.phase_sync("workdir-pack", || {
+        sync::pack_directory(&recipe.workdir).context("packing workspace")
+    })?;
+    ctx.telemetry.phase_sync("workdir-upload", || {
         sync::upload_workdir(
             &ip,
             port,
@@ -96,8 +97,8 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
             &tarball,
             "/home/ubuntu/workspace",
         )
-        .context("uploading workspace to VM")?;
-    }
+        .context("uploading workspace to VM")
+    })?;
     pb.finish_and_clear();
 
     // 7. Await GPU readiness if GPU preset is active
@@ -105,17 +106,18 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         let pb = crate::ui::spinner(
             "Waiting for NVIDIA GPU driver and container toolkit installation (~4-8m)...",
         );
-        {
-            let _p = ctx.telemetry.phase("gpu-wait");
-            wait_for_gpu_ready(
-                &ip,
-                port,
-                &paths.private_key,
-                proxy_cmd.as_deref(),
-                Duration::from_secs(900),
+        ctx.telemetry
+            .phase_try(
+                "gpu-wait",
+                wait_for_gpu_ready(
+                    &ip,
+                    port,
+                    &paths.private_key,
+                    proxy_cmd.as_deref(),
+                    Duration::from_secs(900),
+                ),
             )
             .await?;
-        }
         pb.finish_and_clear();
         println!(
             "{}",
@@ -127,8 +129,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
 
     // 8. Execution: Detached vs Attached
     if args.detach {
-        {
-            let _p = ctx.telemetry.phase("job-exec");
+        ctx.telemetry.phase_sync("job-exec", || {
             execute::execute_job_detached(
                 &ip,
                 port,
@@ -138,8 +139,8 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
                 &recipe.setup_commands,
                 &recipe.run_command,
                 &recipe.output_dir,
-            )?;
-        }
+            )
+        })?;
 
         updated_vm.job = Some(vm.name.clone());
         let _ = store.upsert(updated_vm);
@@ -166,8 +167,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         .bold()
     );
 
-    let exit_code = {
-        let _p = ctx.telemetry.phase("job-exec");
+    let exit_code = ctx.telemetry.phase_sync("job-exec", || {
         execute::execute_job_attached(
             &ip,
             port,
@@ -176,8 +176,8 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
             "/home/ubuntu/workspace",
             &recipe.setup_commands,
             &recipe.run_command,
-        )?
-    };
+        )
+    })?;
 
     // 8. Pull output artifacts
     let local_output_dir = args
@@ -185,8 +185,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         .unwrap_or_else(|| recipe.workdir.join(&recipe.output_dir));
 
     let pb = crate::ui::spinner("Checking for output artifacts...");
-    let dl_res = {
-        let _p = ctx.telemetry.phase("output-download");
+    let dl_res = ctx.telemetry.phase_sync("output-download", || {
         sync::download_output(
             &ip,
             port,
@@ -196,7 +195,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
             &recipe.output_dir,
             &local_output_dir,
         )
-    };
+    });
     match dl_res {
         Ok(true) => {
             pb.finish_and_clear();
@@ -265,34 +264,37 @@ fn print_dry_run_summary(recipe: &RunRecipe, args: &RunArgs) {
 }
 
 pub async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Result<()> {
-    let _p = ctx.telemetry.phase("destroy");
-    let region = ctx.region();
-    let client = ctx.signed();
-    let project = iam::discover_project(&client, &region).await?;
+    ctx.telemetry
+        .phase_try("destroy", async {
+            let region = ctx.region();
+            let client = ctx.signed();
+            let project = iam::discover_project(&client, &region).await?;
 
-    let job_id = ecs::delete_servers(&client, &region, &project.id, &[server_id]).await?;
-    let _ = jobs::poll_job(
-        &client,
-        Service::Ecs,
-        &region,
-        &project.id,
-        &job_id,
-        &PollConfig::default(),
-        ctx.telemetry.as_ref(),
-    )
-    .await;
+            let job_id = ecs::delete_servers(&client, &region, &project.id, &[server_id]).await?;
+            let _ = jobs::poll_job(
+                &client,
+                Service::Ecs,
+                &region,
+                &project.id,
+                &job_id,
+                &PollConfig::default(),
+                ctx.telemetry.as_ref(),
+            )
+            .await;
 
-    let store = StateStore::open()?;
-    if let Ok(Some(r)) = store.get(name) {
-        if let Some(ip) = &r.eip {
-            let _ = keys::remove_known_host(ip);
-        }
-        if let Some(ip) = &r.private_ip {
-            let _ = keys::remove_known_host(ip);
-        }
-    }
-    let _ = store.remove(name);
-    Ok(())
+            let store = StateStore::open()?;
+            if let Ok(Some(r)) = store.get(name) {
+                if let Some(ip) = &r.eip {
+                    let _ = keys::remove_known_host(ip);
+                }
+                if let Some(ip) = &r.private_ip {
+                    let _ = keys::remove_known_host(ip);
+                }
+            }
+            let _ = store.remove(name);
+            anyhow::Ok(())
+        })
+        .await
 }
 
 pub async fn wait_for_gpu_ready(

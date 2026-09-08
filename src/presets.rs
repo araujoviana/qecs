@@ -8,15 +8,15 @@ use std::str::FromStr;
 #[serde(rename_all = "lowercase")]
 #[value(rename_all = "lowercase")]
 pub enum Preset {
-    /// 2 vCPU, 4GB RAM (c7n.large.2) - General purpose ephemeral
+    /// General-purpose default (s7n.2xlarge.2: 8 vCPU / 16 GB, 100 GB disk)
     Normal,
-    /// 2 vCPU, 16GB RAM (m7n.large.8) - Memory intensive
+    /// Memory-heavy (m7.4xlarge.8: 16 vCPU / 128 GB, 100 GB disk)
     Ram,
-    /// 4 vCPU, 8GB RAM (c7n.xlarge.2) - CPU intensive
+    /// CPU-heavy (c7.8xlarge.2: 32 vCPU / 64 GB, 100 GB disk)
     Compute,
-    /// 16 vCPU, 64GB RAM, 1x T4 GPU (pi2.4xlarge.4) - Deep learning & CUDA
+    /// GPU for deep learning / CUDA (pi2.4xlarge.4: 16 vCPU / 64 GB / 2x T4, 200 GB disk)
     Gpu,
-    /// 32 vCPU, 128GB RAM, 2x T4 GPU (pi2.8xlarge.4) - Heavy ML training
+    /// Largest GPU box for heavy training (p2s.8xlarge.8: 32 vCPU / 256 GB / 4x V100, 300 GB disk)
     Beefy,
 }
 
