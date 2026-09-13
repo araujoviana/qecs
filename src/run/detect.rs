@@ -140,14 +140,24 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
         let entry = resolve_python_entry(workdir, explicit_entry);
 
         if workdir.join("uv.lock").is_file() || content.contains("[tool.uv]") {
+            let mut setup_commands = Vec::new();
+            let sys_pkgs = scan_required_system_packages(workdir);
+            if !sys_pkgs.is_empty() {
+                setup_commands.push(format!(
+                    "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends {}",
+                    sys_pkgs.join(" ")
+                ));
+            }
+            setup_commands.push(
+                "which uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh"
+                    .into(),
+            );
+            setup_commands.push("export PATH=\"$HOME/.local/bin:$PATH\"".into());
+            setup_commands.push("uv sync".into());
+
             return Ok(RunRecipe {
                 name: "python-uv".into(),
-                setup_commands: vec![
-                    "which uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh"
-                        .into(),
-                    "source $HOME/.local/bin/env".into(),
-                    "uv sync".into(),
-                ],
+                setup_commands,
                 run_command: format!("uv run {entry}"),
                 preset: default_preset,
                 workdir: workdir.to_path_buf(),
@@ -202,15 +212,24 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
 
     if requirements.is_file() {
         let entry = resolve_python_entry(workdir, explicit_entry);
+        let mut setup_commands = Vec::new();
+        let sys_pkgs = scan_required_system_packages(workdir);
+        if !sys_pkgs.is_empty() {
+            setup_commands.push(format!(
+                "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends {}",
+                sys_pkgs.join(" ")
+            ));
+        }
+        setup_commands.push(
+            "which uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh".into(),
+        );
+        setup_commands.push("export PATH=\"$HOME/.local/bin:$PATH\"".into());
+        setup_commands.push("uv venv .venv".into());
+        setup_commands.push(". .venv/bin/activate && uv pip install -r requirements.txt".into());
+
         return Ok(RunRecipe {
             name: "python-pip".into(),
-            setup_commands: vec![
-                // Debian/Ubuntu split ensurepip out of the base python3 package;
-                // stock cloud images fail `python3 -m venv` without it installed.
-                "python3 -c 'import ensurepip' 2>/dev/null || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-venv)".into(),
-                "python3 -m venv .venv".into(),
-                ". .venv/bin/activate && pip install -r requirements.txt".into(),
-            ],
+            setup_commands,
             run_command: format!(". .venv/bin/activate && python3 {entry}"),
             preset: default_preset,
             workdir: workdir.to_path_buf(),
@@ -220,9 +239,17 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
 
     if has_py_files || explicit_entry.is_some_and(|e| e.ends_with(".py")) {
         let entry = resolve_python_entry(workdir, explicit_entry);
+        let mut setup_commands = Vec::new();
+        let sys_pkgs = scan_required_system_packages(workdir);
+        if !sys_pkgs.is_empty() {
+            setup_commands.push(format!(
+                "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends {}",
+                sys_pkgs.join(" ")
+            ));
+        }
         return Ok(RunRecipe {
             name: "python-bare".into(),
-            setup_commands: vec![],
+            setup_commands,
             run_command: format!("python3 {entry}"),
             preset: default_preset,
             workdir: workdir.to_path_buf(),
@@ -301,9 +328,18 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
 
     // 7. Rust
     if workdir.join("Cargo.toml").is_file() {
+        let sys_pkgs = scan_required_system_packages(workdir);
+        let mut setup = Vec::new();
+        if !sys_pkgs.is_empty() {
+            setup.push(format!(
+                "sudo apt-get update -qq && sudo apt-get install -y -qq {}",
+                sys_pkgs.join(" ")
+            ));
+        }
+        setup.push("cargo build --release".into());
         return Ok(RunRecipe {
             name: "rust-cargo".into(),
-            setup_commands: vec!["cargo build --release".into()],
+            setup_commands: setup,
             run_command: "cargo run --release".into(),
             preset: Preset::Normal,
             workdir: workdir.to_path_buf(),
@@ -476,6 +512,121 @@ fn scan_python_gpu_need(workdir: &Path) -> bool {
     false
 }
 
+/// Heuristically inspect manifests in `workdir` to detect system libraries (.so)
+/// required by popular Python/Node/Rust native packages.
+pub fn scan_required_system_packages(workdir: &Path) -> Vec<&'static str> {
+    let mut packages = std::collections::BTreeSet::new();
+
+    let mut manifest_text = String::new();
+    for file in &[
+        "requirements.txt",
+        "pyproject.toml",
+        "Pipfile",
+        "environment.yml",
+        "package.json",
+        "Cargo.toml",
+    ] {
+        let p = workdir.join(file);
+        if let Ok(content) = fs::read_to_string(&p) {
+            manifest_text.push_str(&content.to_lowercase());
+            manifest_text.push('\n');
+        }
+    }
+
+    if manifest_text.is_empty() {
+        return Vec::new();
+    }
+
+    // OpenCV -> libgl1, libglib2.0-0
+    if manifest_text.contains("opencv") || manifest_text.contains("cv2") {
+        packages.insert("libgl1");
+        packages.insert("libglib2.0-0");
+    }
+
+    // Audio/Video -> ffmpeg, libsndfile1
+    if manifest_text.contains("torchaudio")
+        || manifest_text.contains("whisper")
+        || manifest_text.contains("soundfile")
+        || manifest_text.contains("librosa")
+        || manifest_text.contains("ffmpeg")
+    {
+        packages.insert("ffmpeg");
+        packages.insert("libsndfile1");
+    }
+
+    // PostgreSQL -> libpq-dev
+    if manifest_text.contains("psycopg") || manifest_text.contains("asyncpg") {
+        packages.insert("libpq-dev");
+    }
+
+    // Graphviz -> graphviz, libgraphviz-dev
+    if manifest_text.contains("graphviz") || manifest_text.contains("pygraphviz") {
+        packages.insert("graphviz");
+        packages.insert("libgraphviz-dev");
+    }
+
+    // Cryptography / SSL -> libssl-dev, libffi-dev
+    if manifest_text.contains("cryptography") || manifest_text.contains("pyopenssl") {
+        packages.insert("libssl-dev");
+        packages.insert("libffi-dev");
+    }
+
+    // MySQL -> default-libmysqlclient-dev
+    if manifest_text.contains("mysqlclient") {
+        packages.insert("default-libmysqlclient-dev");
+    }
+
+    // XML -> libxml2-dev, libxslt1-dev
+    if manifest_text.contains("lxml") {
+        packages.insert("libxml2-dev");
+        packages.insert("libxslt1-dev");
+    }
+
+    packages.into_iter().collect()
+}
+
+/// Compute a deterministic cache key from the project's lockfile or dependency manifest.
+pub fn compute_cache_key(workdir: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    // 1. uv.lock
+    let uv_lock = workdir.join("uv.lock");
+    if let Ok(bytes) = fs::read(&uv_lock) {
+        let hash = hex::encode(Sha256::digest(&bytes));
+        return Some(format!("uv-{}", &hash[..16]));
+    }
+
+    // 2. Cargo.lock
+    let cargo_lock = workdir.join("Cargo.lock");
+    if let Ok(bytes) = fs::read(&cargo_lock) {
+        let hash = hex::encode(Sha256::digest(&bytes));
+        return Some(format!("cargo-{}", &hash[..16]));
+    }
+
+    // 3. requirements.txt
+    let reqs = workdir.join("requirements.txt");
+    if let Ok(bytes) = fs::read(&reqs) {
+        let hash = hex::encode(Sha256::digest(&bytes));
+        return Some(format!("pip-{}", &hash[..16]));
+    }
+
+    // 4. pnpm-lock.yaml
+    let pnpm_lock = workdir.join("pnpm-lock.yaml");
+    if let Ok(bytes) = fs::read(&pnpm_lock) {
+        let hash = hex::encode(Sha256::digest(&bytes));
+        return Some(format!("pnpm-{}", &hash[..16]));
+    }
+
+    // 5. package-lock.json
+    let pkg_lock = workdir.join("package-lock.json");
+    if let Ok(bytes) = fs::read(&pkg_lock) {
+        let hash = hex::encode(Sha256::digest(&bytes));
+        return Some(format!("npm-{}", &hash[..16]));
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,5 +758,40 @@ mod tests {
         let recipe = detect_recipe(&py_file).unwrap();
         assert_eq!(recipe.name, "python-bare");
         assert_eq!(recipe.run_command, "python3 custom_task.py");
+    }
+
+    #[test]
+    fn scan_required_system_packages_detects_libraries() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("requirements.txt"),
+            "opencv-python>=4.8\ntorchaudio\npsycopg2-binary\n",
+        )
+        .unwrap();
+
+        let pkgs = scan_required_system_packages(dir.path());
+        assert!(pkgs.contains(&"libgl1"));
+        assert!(pkgs.contains(&"libglib2.0-0"));
+        assert!(pkgs.contains(&"ffmpeg"));
+        assert!(pkgs.contains(&"libsndfile1"));
+        assert!(pkgs.contains(&"libpq-dev"));
+    }
+
+    #[test]
+    fn compute_cache_key_detects_lockfiles() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(compute_cache_key(dir.path()), None);
+
+        fs::write(dir.path().join("requirements.txt"), "torch==2.1.0\n").unwrap();
+        let key = compute_cache_key(dir.path()).unwrap();
+        assert!(key.starts_with("pip-"));
+
+        fs::write(dir.path().join("uv.lock"), "version = 1\n").unwrap();
+        let uv_key = compute_cache_key(dir.path()).unwrap();
+        assert!(uv_key.starts_with("uv-"));
+
+        fs::write(dir.path().join("Cargo.lock"), "version = 3\n").unwrap();
+        // uv.lock has higher priority in compute_cache_key
+        assert!(compute_cache_key(dir.path()).unwrap().starts_with("uv-"));
     }
 }

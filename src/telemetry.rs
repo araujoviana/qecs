@@ -105,6 +105,11 @@ pub fn subcommand_label(cmd: &crate::cli::Commands) -> &'static str {
             ImageAction::Ls => "image-ls",
             ImageAction::Delete(_) => "image-delete",
         },
+        Commands::Cache(a) => match a.action {
+            crate::cli::CacheAction::Ls => "cache-ls",
+            crate::cli::CacheAction::Clean { .. } => "cache-clean",
+            crate::cli::CacheAction::Destroy { .. } => "cache-destroy",
+        },
         Commands::Completion(_) => "completion",
     }
 }

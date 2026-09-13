@@ -1,11 +1,12 @@
 //! region + service -> API host.
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Service {
     Ecs,
     Ims,
     Vpc,
     Iam,
+    Obs,
 }
 
 impl Service {
@@ -15,6 +16,7 @@ impl Service {
             Service::Ims => "ims",
             Service::Vpc => "vpc",
             Service::Iam => "iam",
+            Service::Obs => "obs",
         }
     }
 }
@@ -36,6 +38,10 @@ mod tests {
         assert_eq!(
             endpoint_host(Service::Ims, "sa-brazil-1"),
             "ims.sa-brazil-1.myhuaweicloud.com"
+        );
+        assert_eq!(
+            endpoint_host(Service::Obs, "ap-southeast-3"),
+            "obs.ap-southeast-3.myhuaweicloud.com"
         );
     }
 }

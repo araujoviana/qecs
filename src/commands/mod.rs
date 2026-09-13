@@ -1,5 +1,6 @@
 //! Command implementations for qecs CLI subcommands.
 
+pub mod cache;
 pub mod gc;
 pub mod image;
 pub mod info;

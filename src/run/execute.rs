@@ -91,6 +91,7 @@ pub fn build_detached_launcher(
     run_cmd: &str,
     trailing_args: &[String],
     output_subdir: &str,
+    post_success_cmd: Option<&str>,
 ) -> String {
     let full_run_cmd = if trailing_args.is_empty() {
         run_cmd.to_string()
@@ -103,6 +104,12 @@ pub fn build_detached_launcher(
         format!("{run_cmd} {quoted_args}")
     };
 
+    let post_cmd = if let Some(cmd) = post_success_cmd {
+        format!("[ $RET -eq 0 ] && {cmd}\n")
+    } else {
+        String::new()
+    };
+
     let script = format!(
         "mkdir -p /run/qecs && touch /run/qecs/job.lock\n\
          trap 'rm -f /run/qecs/job.lock' EXIT\n\
@@ -111,7 +118,9 @@ pub fn build_detached_launcher(
          cd '{remote_dir}' || exit 1\n\
          {setup}\n\
          {full_run_cmd}\n\
-         echo $? > /home/ubuntu/job.exit\n",
+         RET=$?\n\
+         echo $RET > /home/ubuntu/job.exit\n\
+         {post_cmd}",
         setup = setup_cmds.join("\n")
     );
 
@@ -137,6 +146,7 @@ pub fn execute_job_detached(
     run_cmd: &str,
     trailing_args: &[String],
     output_subdir: &str,
+    post_success_cmd: Option<&str>,
 ) -> anyhow::Result<()> {
     let setup_runner_cmd = build_detached_launcher(
         remote_dir,
@@ -144,6 +154,7 @@ pub fn execute_job_detached(
         run_cmd,
         trailing_args,
         output_subdir,
+        post_success_cmd,
     );
 
     let status = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
@@ -156,6 +167,20 @@ pub fn execute_job_detached(
     }
 
     Ok(())
+}
+
+/// Execute a raw command over SSH non-interactively (e.g. for cache uploads or housekeeping).
+pub fn run_remote_command(
+    ip: &str,
+    port: u16,
+    key_path: &Path,
+    proxy_command: Option<&str>,
+    command: &str,
+) -> anyhow::Result<std::process::ExitStatus> {
+    crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
+        .arg(command)
+        .status()
+        .context("running remote command over SSH")
 }
 
 /// Stage environment variables into `/run/qecs/job.env` on the remote VM.
@@ -235,6 +260,7 @@ mod tests {
             "python3 main.py",
             &[],
             "results",
+            None,
         );
         // wait needs to learn the recipe's output_dir; it is written to the marker
         // file before the job is backgrounded.
@@ -250,10 +276,25 @@ mod tests {
 
     #[test]
     fn detached_launcher_still_stages_run_job_and_writes_exit_code() {
-        let launcher = build_detached_launcher("/home/ubuntu/workspace", &[], "true", &[], "out");
+        let launcher =
+            build_detached_launcher("/home/ubuntu/workspace", &[], "true", &[], "out", None);
         assert!(launcher.contains("cat << 'EOF' > /home/ubuntu/run-job.sh"));
-        assert!(launcher.contains("echo $? > /home/ubuntu/job.exit"));
+        assert!(launcher.contains("RET=$?"));
+        assert!(launcher.contains("echo $RET > /home/ubuntu/job.exit"));
         assert!(launcher.contains("touch /run/qecs/job.lock"));
+    }
+
+    #[test]
+    fn detached_launcher_includes_post_success_cmd() {
+        let launcher = build_detached_launcher(
+            "/home/ubuntu/workspace",
+            &[],
+            "true",
+            &[],
+            "out",
+            Some("curl -X PUT https://example.com/cache"),
+        );
+        assert!(launcher.contains("[ $RET -eq 0 ] && curl -X PUT https://example.com/cache"));
     }
 
     #[test]

@@ -41,15 +41,20 @@ impl SignedClient {
         }
     }
 
+    pub fn creds(&self) -> &Credentials {
+        &self.creds
+    }
+
     pub fn with_telemetry(mut self, telemetry: Option<Telemetry>) -> Self {
         self.telemetry = telemetry;
         self
     }
 
-    pub(crate) fn signed_headers_for(
+    pub(crate) fn signed_headers_for_content(
         &self,
         method: &Method,
         url: &str,
+        content_type: Option<&str>,
         body: Option<&[u8]>,
     ) -> HeaderMap {
         let parsed = reqwest::Url::parse(url).expect("valid url");
@@ -61,7 +66,9 @@ impl SignedClient {
             ("host".into(), host.clone()),
             ("x-sdk-date".into(), sdk_date.clone()),
         ];
-        if !body.is_empty() {
+        if let Some(ct) = content_type {
+            hv.push(("content-type".into(), ct.to_string()));
+        } else if !body.is_empty() {
             hv.push(("content-type".into(), "application/json".into()));
         }
         if let Some(tok) = &self.creds.security_token {
@@ -88,7 +95,9 @@ impl SignedClient {
         let mut out = HeaderMap::new();
         out.insert("Host", HeaderValue::from_str(&host).unwrap());
         out.insert("X-Sdk-Date", HeaderValue::from_str(&sdk_date).unwrap());
-        if !body.is_empty() {
+        if let Some(ct) = content_type {
+            out.insert("Content-Type", HeaderValue::from_str(ct).unwrap());
+        } else if !body.is_empty() {
             out.insert("Content-Type", HeaderValue::from_static("application/json"));
         }
         if let Some(tok) = &self.creds.security_token {
@@ -99,6 +108,96 @@ impl SignedClient {
             HeaderValue::from_str(&auth).unwrap(),
         );
         out
+    }
+
+    pub(crate) fn signed_headers_for(
+        &self,
+        method: &Method,
+        url: &str,
+        body: Option<&[u8]>,
+    ) -> HeaderMap {
+        self.signed_headers_for_content(method, url, None, body)
+    }
+
+    pub async fn send_raw(
+        &self,
+        method: Method,
+        url: &str,
+        content_type: Option<&str>,
+        body: Option<&[u8]>,
+    ) -> Result<(u16, String), ApiError> {
+        let t0 = Instant::now();
+        let method_str = method.to_string();
+        let parsed_url = reqwest::Url::parse(url).ok();
+        let host = parsed_url
+            .as_ref()
+            .and_then(|u| u.host_str())
+            .unwrap_or("")
+            .to_string();
+        let path = parsed_url
+            .as_ref()
+            .map(|u| u.path())
+            .unwrap_or("")
+            .to_string();
+
+        let headers = self.signed_headers_for_content(&method, url, content_type, body);
+        let mut req = self.http.request(method, url).headers(headers);
+        if let Some(r) = body {
+            req = req.body(r.to_vec());
+        }
+        let send_res = req.send().await;
+        let ttfb = t0.elapsed();
+
+        let resp = match send_res {
+            Ok(r) => r,
+            Err(e) => {
+                let total = t0.elapsed();
+                if let Some(t) = &self.telemetry {
+                    t.record_hwc(HwcCall {
+                        method: method_str,
+                        host,
+                        path,
+                        status: 0,
+                        request_id: None,
+                        ttfb_ms: ttfb.as_millis() as u64,
+                        total_ms: total.as_millis() as u64,
+                        resp_bytes: 0,
+                        phase: current_phase().map(String::from),
+                    });
+                }
+                return Err(ApiError {
+                    status: 0,
+                    code: None,
+                    message: e.to_string(),
+                });
+            }
+        };
+
+        let status = resp.status().as_u16();
+        let request_id = resp
+            .headers()
+            .get("x-request-id")
+            .or_else(|| resp.headers().get("x-openstack-request-id"))
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let text = resp.text().await.unwrap_or_default();
+        let total = t0.elapsed();
+
+        if let Some(t) = &self.telemetry {
+            t.record_hwc(HwcCall {
+                method: method_str,
+                host,
+                path,
+                status,
+                request_id,
+                ttfb_ms: ttfb.as_millis() as u64,
+                total_ms: total.as_millis() as u64,
+                resp_bytes: text.len() as u64,
+                phase: current_phase().map(String::from),
+            });
+        }
+
+        Ok((status, text))
     }
 
     pub async fn send_json<T: DeserializeOwned>(

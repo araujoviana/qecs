@@ -76,6 +76,8 @@ pub enum Commands {
     Presets,
     /// Manage and build pre-baked IMS images for accelerated cold starts.
     Image(ImageArgs),
+    /// Manage the regional OBS dependency and build cache.
+    Cache(CacheArgs),
     /// Generate shell completion script (bash, zsh, fish, powershell, elvish).
     Completion(CompletionArgs),
 }
@@ -124,6 +126,9 @@ pub struct RunArgs {
     /// Disable pseudo-terminal (PTY) allocation.
     #[arg(long, conflicts_with = "pty")]
     pub no_pty: bool,
+    /// Disable regional OBS dependency and build caching for this run.
+    #[arg(long)]
+    pub no_cache: bool,
     /// Trailing arguments passed directly to the run command.
     #[arg(last = true)]
     pub args: Vec<String>,
@@ -213,6 +218,30 @@ pub struct CompletionArgs {
     /// Target shell to generate completions for.
     #[arg(value_enum)]
     pub shell: clap_complete::Shell,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CacheArgs {
+    #[command(subcommand)]
+    pub action: CacheAction,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum CacheAction {
+    /// List all cached objects and their sizes in the regional OBS bucket.
+    Ls,
+    /// Delete all cached dependency and build artifacts from the regional OBS bucket.
+    Clean {
+        /// Force deletion without confirmation.
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Completely destroy the regional OBS cache bucket and all its contents.
+    Destroy {
+        /// Force destruction without confirmation.
+        #[arg(short, long)]
+        force: bool,
+    },
 }
 
 #[cfg(test)]
@@ -438,6 +467,44 @@ mod tests {
             }
             _ => panic!("wrong command"),
         }
+    }
+
+    #[test]
+    fn parses_run_with_no_cache() {
+        let cli = Cli::try_parse_from(["qecs", "run", "--no-cache"]).unwrap();
+        match cli.command {
+            Commands::Run(a) => {
+                assert!(a.no_cache);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn parses_cache_subcommands() {
+        let cli = Cli::try_parse_from(["qecs", "cache", "ls"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Cache(CacheArgs {
+                action: CacheAction::Ls
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["qecs", "cache", "clean", "--force"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Cache(CacheArgs {
+                action: CacheAction::Clean { force: true }
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["qecs", "cache", "destroy"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Cache(CacheArgs {
+                action: CacheAction::Destroy { force: false }
+            })
+        ));
     }
 
     #[test]

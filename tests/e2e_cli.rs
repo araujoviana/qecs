@@ -332,3 +332,39 @@ fn run_dry_run_with_artifacts_flag() {
             ),
         );
 }
+
+#[test]
+fn run_help_includes_no_cache() {
+    qecs()
+        .args(["run", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--no-cache"));
+}
+
+#[test]
+fn cache_help_exits_zero_and_shows_subcommands() {
+    qecs().args(["cache", "--help"]).assert().success().stdout(
+        predicate::str::contains("ls")
+            .and(predicate::str::contains("clean"))
+            .and(predicate::str::contains("destroy")),
+    );
+}
+
+#[test]
+fn cache_clean_help_shows_force_flag() {
+    qecs()
+        .args(["cache", "clean", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--force"));
+}
+
+#[test]
+fn cache_destroy_help_shows_force_flag() {
+    qecs()
+        .args(["cache", "destroy", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--force"));
+}

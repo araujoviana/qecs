@@ -7,6 +7,7 @@ pub mod iam;
 pub mod images;
 pub mod jobs;
 pub mod keypair;
+pub mod obs;
 pub mod security_group;
 pub mod sign;
 pub mod vpc;

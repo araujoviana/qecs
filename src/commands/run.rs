@@ -144,10 +144,68 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         );
     }
 
+    // 10b. Prepare OBS dependency caching
+    let mut effective_setup_cmds = recipe.setup_commands.clone();
+    let cache_key = if !args.no_cache {
+        crate::run::detect::compute_cache_key(&recipe.workdir)
+    } else {
+        None
+    };
+
+    let cache_put_url = if let Some(ref key) = cache_key {
+        let client = ctx.signed();
+        let region = ctx.region();
+        let project_id_res = ctx
+            .telemetry
+            .phase_try("iam-project", iam::discover_project(&client, &region))
+            .await;
+
+        if let Ok(project) = project_id_res {
+            let bucket = crate::hwc::obs::cache_bucket_name(&region, &project.id);
+            let _ = crate::hwc::obs::ensure_cache_bucket(&client, &region, &bucket).await;
+            let object_key = format!("caches/{key}.tar.gz");
+
+            let get_url = crate::hwc::obs::generate_presigned_url(
+                client.creds(),
+                &region,
+                &bucket,
+                &object_key,
+                "GET",
+                900,
+            );
+            let restore_cmd = format!(
+                "curl -sf -o /tmp/qecs-cache.tar.gz \"{get_url}\" && tar -xzf /tmp/qecs-cache.tar.gz -C /home/ubuntu 2>/dev/null && rm -f /tmp/qecs-cache.tar.gz || true"
+            );
+            effective_setup_cmds.insert(0, restore_cmd);
+
+            let put_url = crate::hwc::obs::generate_presigned_url(
+                client.creds(),
+                &region,
+                &bucket,
+                &object_key,
+                "PUT",
+                1800,
+            );
+            Some(put_url)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // 11. Execution: Detached vs Attached
     let artifact_spec = args.artifacts.as_deref().unwrap_or(&recipe.output_dir);
 
     if args.detach {
+        let cache_upload_cmd = cache_put_url.as_ref().map(|put_url| {
+            format!(
+                "if [ -d /home/ubuntu/.cache ] || [ -d /home/ubuntu/.cargo ]; then \
+                    tar -czf - -C /home/ubuntu $([ -d /home/ubuntu/.cache ] && echo .cache) $([ -d /home/ubuntu/.cargo ] && echo .cargo) 2>/dev/null | curl -sf -X PUT --upload-file - \"{put_url}\" || true; \
+                fi"
+            )
+        });
+
         ctx.telemetry.phase_sync("job-exec", || {
             execute::execute_job_detached(
                 &ip,
@@ -155,10 +213,11 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
                 &paths.private_key,
                 proxy_cmd.as_deref(),
                 "/home/ubuntu/workspace",
-                &recipe.setup_commands,
+                &effective_setup_cmds,
                 &effective_run_cmd,
                 &args.args,
                 artifact_spec,
+                cache_upload_cmd.as_deref(),
             )
         })?;
 
@@ -202,12 +261,32 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
             &paths.private_key,
             proxy_cmd.as_deref(),
             "/home/ubuntu/workspace",
-            &recipe.setup_commands,
+            &effective_setup_cmds,
             &effective_run_cmd,
             &args.args,
             pty_opt,
         )
     })?;
+
+    // If attached job succeeded, save cache to OBS
+    if exit_code == 0
+        && let Some(ref put_url) = cache_put_url
+    {
+        let pb = crate::ui::spinner("Saving dependency cache to OBS...");
+        let cache_upload_cmd = format!(
+            "if [ -d /home/ubuntu/.cache ] || [ -d /home/ubuntu/.cargo ]; then \
+                    tar -czf - -C /home/ubuntu $([ -d /home/ubuntu/.cache ] && echo .cache) $([ -d /home/ubuntu/.cargo ] && echo .cargo) 2>/dev/null | curl -sf -X PUT --upload-file - \"{put_url}\" || true; \
+                fi"
+        );
+        let _ = execute::run_remote_command(
+            &ip,
+            port,
+            &paths.private_key,
+            proxy_cmd.as_deref(),
+            &cache_upload_cmd,
+        );
+        pb.finish_and_clear();
+    }
 
     // 12. Post-mortem diagnostics BEFORE VM teardown
     let diagnostic = if exit_code != 0 {

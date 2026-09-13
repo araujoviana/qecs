@@ -16,7 +16,7 @@ pub struct CanonicalParts<'a> {
 
 const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
 
-fn pct(s: &str) -> String {
+pub fn pct(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
         if UNRESERVED.contains(b) {
