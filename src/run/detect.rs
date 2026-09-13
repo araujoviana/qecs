@@ -205,6 +205,9 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
         return Ok(RunRecipe {
             name: "python-pip".into(),
             setup_commands: vec![
+                // Debian/Ubuntu split ensurepip out of the base python3 package;
+                // stock cloud images fail `python3 -m venv` without it installed.
+                "python3 -c 'import ensurepip' 2>/dev/null || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-venv)".into(),
                 "python3 -m venv .venv".into(),
                 ". .venv/bin/activate && pip install -r requirements.txt".into(),
             ],

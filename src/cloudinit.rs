@@ -191,6 +191,22 @@ write_files:
       Port 22
       Port 443
 
+  - path: /usr/local/bin/qecs-dns-resilience.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -u
+      # HWC's per-subnet DHCP-provided DNS relay has been observed to answer
+      # ICMP but drop UDP/53 during regional outages. systemd-resolved's
+      # FallbackDNS only activates when NO per-link server is known at all,
+      # so a dead-but-present relay never triggers it. Appending public
+      # resolvers to the link's own DNS list gives resolved real servers to
+      # retry when the primary one times out.
+      IFACE=$(ip -o -4 route show default | awk '{{print $5}}' | head -n1)
+      [ -z "$IFACE" ] && IFACE=eth0
+      CURRENT=$(resolvectl dns "$IFACE" 2>/dev/null | sed -E 's/^Link [0-9]+ \([^)]*\):\s*//')
+      resolvectl dns "$IFACE" $CURRENT 1.1.1.1 8.8.8.8 1.0.0.1 8.8.4.4 2>/dev/null || true
+
   - path: /usr/local/bin/qecs-guard.sh
     permissions: "0755"
     content: |
@@ -287,7 +303,9 @@ write_files:
 {gpu_write_files}{relay_write_files}
 runcmd:
   - [systemctl, restart, ssh]
+  - [bash, /usr/local/bin/qecs-dns-resilience.sh]
   - [mkdir, -p, /run/qecs]
+  - [chmod, "1777", /run/qecs]
   - [systemctl, daemon-reload]
   - [systemctl, enable, --now, qecs-guard.timer]
 {gpu_runcmd}{relay_runcmd}  - shutdown -h +{ttl_minutes} "qecs hard TTL guard"
@@ -421,8 +439,8 @@ mod tests {
         }
 
         assert_eq!(
-            script_count, 2,
-            "should validate both guard and gpu scripts"
+            script_count, 3,
+            "should validate dns-resilience, guard, and gpu scripts"
         );
     }
 
