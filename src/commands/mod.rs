@@ -8,6 +8,7 @@ pub mod info;
 pub mod kill;
 pub mod logs;
 pub mod ls;
+pub mod mcp;
 pub mod run;
 pub mod setup;
 pub mod shell;

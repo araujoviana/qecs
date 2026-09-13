@@ -388,3 +388,66 @@ fn attach_without_active_vms_reports_error() {
         .failure()
         .stderr(predicate::str::contains("no active VMs found"));
 }
+
+#[test]
+fn mcp_help_exits_zero() {
+    qecs()
+        .args(["mcp", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("serve"));
+}
+
+#[test]
+fn mcp_serve_help_exits_zero() {
+    qecs()
+        .args(["mcp", "serve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Start the MCP JSON-RPC 2.0 stdio server",
+        ));
+}
+
+#[test]
+fn mcp_serve_stdio_initialize_and_tools_list() {
+    let request_init = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n";
+    let request_tools = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n";
+    let input = format!("{request_init}{request_tools}");
+
+    let out = qecs()
+        .args(["mcp", "serve"])
+        .write_stdin(input)
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines.len(), 2, "Expected 2 responses for 2 requests");
+
+    // Line 1: Initialize result
+    let init_resp: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(init_resp["jsonrpc"], "2.0");
+    assert_eq!(init_resp["id"], 1);
+    assert_eq!(init_resp["result"]["serverInfo"]["name"], "qecs");
+    assert_eq!(init_resp["result"]["protocolVersion"], "2024-11-05");
+
+    // Line 2: Tools list result
+    let tools_resp: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(tools_resp["jsonrpc"], "2.0");
+    assert_eq!(tools_resp["id"], 2);
+    let tools = tools_resp["result"]["tools"]
+        .as_array()
+        .expect("tools array");
+    let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(tool_names.contains(&"qecs_run"));
+    assert!(tool_names.contains(&"qecs_up"));
+    assert!(tool_names.contains(&"qecs_ls"));
+    assert!(tool_names.contains(&"qecs_info"));
+    assert!(tool_names.contains(&"qecs_logs"));
+    assert!(tool_names.contains(&"qecs_wait"));
+    assert!(tool_names.contains(&"qecs_kill"));
+    assert!(tool_names.contains(&"qecs_presets"));
+    assert!(tool_names.contains(&"qecs_cache_clean"));
+}

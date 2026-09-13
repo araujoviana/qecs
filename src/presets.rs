@@ -71,7 +71,7 @@ impl fmt::Display for Preset {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedSpec {
     pub preset: Preset,
     pub flavor: String,

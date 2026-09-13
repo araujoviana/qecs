@@ -119,6 +119,10 @@ async fn run_command(
             let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::attach::cmd_attach(&ctx, args.clone()).await
         }
+        Commands::Mcp(ref args) => {
+            let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
+            qecs::commands::mcp::cmd_mcp(&ctx, args.clone()).await
+        }
         Commands::Completion(ref args) => {
             use clap::CommandFactory;
             let mut cmd = Cli::command();

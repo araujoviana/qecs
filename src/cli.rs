@@ -80,6 +80,8 @@ pub enum Commands {
     Cache(CacheArgs),
     /// Attach to an interactive session on a running VM.
     Attach(AttachArgs),
+    /// Model Context Protocol (MCP) server for AI assistants.
+    Mcp(McpArgs),
     /// Generate shell completion script (bash, zsh, fish, powershell, elvish).
     Completion(CompletionArgs),
 }
@@ -250,6 +252,18 @@ pub enum CacheAction {
         #[arg(short, long)]
         force: bool,
     },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct McpArgs {
+    #[command(subcommand)]
+    pub action: McpAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum McpAction {
+    /// Start the MCP JSON-RPC 2.0 stdio server.
+    Serve,
 }
 
 #[cfg(test)]
