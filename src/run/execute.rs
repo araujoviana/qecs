@@ -7,6 +7,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use anyhow::Context;
+use colored::Colorize;
 
 /// Build the composite remote script to execute in `remote_dir`.
 pub fn build_script(
@@ -44,7 +45,9 @@ pub fn build_script(
 }
 
 /// Execute a job in attached mode, streaming stdout and stderr live to the local terminal.
-/// Returns the remote process exit code.
+/// In interactive PTY mode, execution is wrapped in a resilient remote `tmux` session,
+/// shielding the job from network drops and supporting in-flight detachment (`Ctrl+B d`).
+/// In non-PTY mode, execution streams directly with zero multiplexer overhead.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_job_attached(
     ip: &str,
@@ -56,26 +59,102 @@ pub fn execute_job_attached(
     run_cmd: &str,
     trailing_args: &[String],
     pty: Option<bool>,
+    control_socket: Option<&Path>,
 ) -> anyhow::Result<i32> {
     let script = build_script(remote_dir, setup_cmds, run_cmd, trailing_args);
-    let remote_cmd = format!("bash -c {arg}", arg = shlex_quote(&script));
 
     let use_pty = pty.unwrap_or_else(|| {
         use std::io::IsTerminal;
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
     });
 
-    let status =
-        crate::connect::build_ssh_command_ext(ip, port, key_path, proxy_command, Some(use_pty))
-            .arg(&remote_cmd)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .context("executing remote job over SSH")?;
+    if use_pty {
+        let launch_cmd = crate::run::session::build_tmux_launch_script(
+            crate::run::session::DEFAULT_SESSION_NAME,
+            &script,
+        );
 
-    let code = status.code().unwrap_or(1);
-    Ok(code)
+        let stage_status = crate::connect::build_ssh_command_full(
+            ip,
+            port,
+            key_path,
+            proxy_command,
+            Some(false),
+            control_socket,
+        )
+        .arg(format!("bash -c {arg}", arg = shlex_quote(&launch_cmd)))
+        .status()
+        .context("launching resilient tmux session over SSH")?;
+
+        if !stage_status.success() {
+            anyhow::bail!("failed to initialize remote session on VM");
+        }
+
+        let attach_cmd =
+            crate::run::session::build_tmux_attach_cmd(crate::run::session::DEFAULT_SESSION_NAME);
+
+        let _ = crate::connect::build_ssh_command_full(
+            ip,
+            port,
+            key_path,
+            proxy_command,
+            Some(true),
+            control_socket,
+        )
+        .arg(&attach_cmd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status();
+
+        let is_running = crate::run::session::is_session_running(
+            ip,
+            port,
+            key_path,
+            proxy_command,
+            crate::run::session::DEFAULT_SESSION_NAME,
+        )
+        .unwrap_or(false);
+
+        if is_running {
+            println!(
+                "{}",
+                "✓ Session detached. Job continues running in background."
+                    .yellow()
+                    .bold()
+            );
+            println!("  Reattach: qecs attach");
+            println!("  Logs:     qecs logs --follow");
+            return Ok(0);
+        }
+
+        if let Ok(Some(exit_code)) =
+            crate::run::session::read_remote_exit_code(ip, port, key_path, proxy_command)
+        {
+            return Ok(exit_code);
+        }
+
+        Ok(0)
+    } else {
+        let remote_cmd = format!("bash -c {arg}", arg = shlex_quote(&script));
+        let status = crate::connect::build_ssh_command_full(
+            ip,
+            port,
+            key_path,
+            proxy_command,
+            Some(false),
+            control_socket,
+        )
+        .arg(&remote_cmd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("executing remote job over SSH")?;
+
+        let code = status.code().unwrap_or(1);
+        Ok(code)
+    }
 }
 
 /// Marker file the detached launcher drops so `qecs wait` knows which directory

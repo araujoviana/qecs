@@ -115,6 +115,10 @@ async fn run_command(
             let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::cache::cmd_cache(&ctx, args.clone()).await
         }
+        Commands::Attach(ref args) => {
+            let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
+            qecs::commands::attach::cmd_attach(&ctx, args.clone()).await
+        }
         Commands::Completion(ref args) => {
             use clap::CommandFactory;
             let mut cmd = Cli::command();
@@ -144,6 +148,7 @@ end
 
 complete -c qecs -n "__fish_qecs_using_subcommand completion" -f -a "bash elvish fish powershell zsh"
 complete -c qecs -n "__fish_qecs_using_subcommand shell" -f -a "(__fish_qecs_active_vms)"
+complete -c qecs -n "__fish_qecs_using_subcommand attach" -f -a "(__fish_qecs_active_vms)"
 complete -c qecs -n "__fish_qecs_using_subcommand info" -f -a "(__fish_qecs_active_vms)"
 complete -c qecs -n "__fish_qecs_using_subcommand logs" -f -a "(__fish_qecs_active_vms)"
 complete -c qecs -n "__fish_qecs_using_subcommand wait" -f -a "(__fish_qecs_active_vms)"

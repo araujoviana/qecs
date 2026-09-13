@@ -78,6 +78,8 @@ pub enum Commands {
     Image(ImageArgs),
     /// Manage the regional OBS dependency and build cache.
     Cache(CacheArgs),
+    /// Attach to an interactive session on a running VM.
+    Attach(AttachArgs),
     /// Generate shell completion script (bash, zsh, fish, powershell, elvish).
     Completion(CompletionArgs),
 }
@@ -152,6 +154,12 @@ pub struct UpArgs {
 #[derive(Args, Debug, Clone)]
 pub struct ShellArgs {
     pub name: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AttachArgs {
+    /// Target VM name or prefix (optional if only one VM is active).
+    pub target: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]

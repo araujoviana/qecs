@@ -21,6 +21,18 @@ pub fn build_ssh_args_ext(
     proxy_command: Option<&str>,
     pty: Option<bool>,
 ) -> Vec<String> {
+    build_ssh_args_full(ip, port, key_path, proxy_command, pty, None)
+}
+
+/// Build common SSH command-line arguments with optional PTY and ControlMaster socket.
+pub fn build_ssh_args_full(
+    ip: &str,
+    port: u16,
+    key_path: &Path,
+    proxy_command: Option<&str>,
+    pty: Option<bool>,
+    control_socket: Option<&Path>,
+) -> Vec<String> {
     // Host-key verification stays on (trust-on-first-use), but in a qecs-owned
     // known_hosts file so ephemeral VMs churning a recycled elastic-IP pool
     // never wedge the user's ~/.ssh/known_hosts. BatchMode keeps a failed key
@@ -58,6 +70,15 @@ pub fn build_ssh_args_ext(
         }
     }
 
+    if let Some(sock) = control_socket {
+        args.push("-o".to_string());
+        args.push("ControlMaster=auto".to_string());
+        args.push("-o".to_string());
+        args.push(format!("ControlPath={}", sock.display()));
+        args.push("-o".to_string());
+        args.push("ControlPersist=180".to_string());
+    }
+
     if let Some(proxy) = proxy_command {
         args.push("-o".to_string());
         args.push(format!("ProxyCommand={proxy}"));
@@ -85,7 +106,19 @@ pub fn build_ssh_command_ext(
     proxy_command: Option<&str>,
     pty: Option<bool>,
 ) -> Command {
-    let args = build_ssh_args_ext(ip, port, key_path, proxy_command, pty);
+    build_ssh_command_full(ip, port, key_path, proxy_command, pty, None)
+}
+
+/// Build a configured `std::process::Command` with optional PTY and ControlMaster socket.
+pub fn build_ssh_command_full(
+    ip: &str,
+    port: u16,
+    key_path: &Path,
+    proxy_command: Option<&str>,
+    pty: Option<bool>,
+    control_socket: Option<&Path>,
+) -> Command {
+    let args = build_ssh_args_full(ip, port, key_path, proxy_command, pty, control_socket);
     let mut cmd = Command::new("ssh");
     cmd.args(&args);
     cmd

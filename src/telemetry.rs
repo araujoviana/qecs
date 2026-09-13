@@ -110,6 +110,7 @@ pub fn subcommand_label(cmd: &crate::cli::Commands) -> &'static str {
             crate::cli::CacheAction::Clean { .. } => "cache-clean",
             crate::cli::CacheAction::Destroy { .. } => "cache-destroy",
         },
+        Commands::Attach(_) => "attach",
         Commands::Completion(_) => "completion",
     }
 }

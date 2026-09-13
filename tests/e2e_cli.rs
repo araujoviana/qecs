@@ -368,3 +368,23 @@ fn cache_destroy_help_shows_force_flag() {
         .success()
         .stdout(predicate::str::contains("--force"));
 }
+
+#[test]
+fn attach_help_exits_zero() {
+    qecs()
+        .args(["attach", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Attach to an interactive session"));
+}
+
+#[test]
+fn attach_without_active_vms_reports_error() {
+    let td = tempfile::tempdir().unwrap();
+    qecs()
+        .env("XDG_STATE_HOME", td.path())
+        .args(["attach"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no active VMs found"));
+}

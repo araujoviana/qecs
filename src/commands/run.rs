@@ -254,6 +254,16 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         None
     };
 
+    let control_session = crate::run::tunnel::ControlMasterSession::new(
+        &vm.name,
+        &ip,
+        port,
+        &paths.private_key,
+        proxy_cmd.as_deref(),
+    );
+
+    let watcher_stop = crate::run::tunnel::spawn_port_watcher(control_session.clone());
+
     let exit_code = ctx.telemetry.phase_sync("job-exec", || {
         execute::execute_job_attached(
             &ip,
@@ -265,8 +275,11 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
             &effective_run_cmd,
             &args.args,
             pty_opt,
+            Some(&control_session.socket_path),
         )
     })?;
+
+    let _ = watcher_stop.send(());
 
     // If attached job succeeded, save cache to OBS
     if exit_code == 0
