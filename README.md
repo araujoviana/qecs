@@ -1,125 +1,139 @@
 # qecs
 
-Provision a strong, ephemeral Huawei Cloud (HWC) VM, run one job on it, and throw it away before it costs money.
+Run code on disposable, high-spec Huawei Cloud (HWC) machines and destroy them the second they finish.
 
-## Workflows
-
-qecs supports two primary workflows:
-
-- **Abstracted (`qecs run`)**: Package your local directory, ship it to a fresh VM, auto-detect the project stack (Rust Cargo, Python uv/pip, Docker, npm/pnpm, bash script), stream the remote execution logs, retrieve `./out` artifacts back locally, and automatically destroy the VM.
-- **Interactive (`qecs up` / `qecs shell`)**: Bring up an on-demand VM with hard TTL and idle-shutdown protection, shell in, and destroy it when finished.
-
-## Installation
-
-```bash
-cargo install --path .
-bash scripts/install-hooks.sh   # contributors only: enables version bump hook
-```
+`qecs` packages your directory, boots an on-demand Pay-Per-Use VM, runs your workload with live terminal output, pulls your artifacts back, and tears the machine down. No orphaned VMs, no leftover disks, and no manual SSH wrestling.
 
 ## Quick Start
 
 ```bash
-# 1. Configure credentials and preferred region
+# 1. Install & set credentials
+cargo install --path .
 qecs setup
 
-# 2. View available hardware presets
-qecs presets
-
-# 3. Ship and run the current directory on an ephemeral machine
+# 2. Run your local project in the cloud (auto-detects Python/uv, Rust, Node, Docker)
 qecs run .
 
-# Or run with GPU preset and detached execution
-qecs run --preset gpu --detach .
-qecs logs
-qecs wait
+# 3. Pass arguments, inject environment variables, or run ad-hoc commands
+qecs run . -e MODEL=llama -- --batch-size 32
+qecs run . -c "pytest tests/ -v"
+
+# 4. Spin up a GPU instance and grab training checkpoints
+qecs run --preset gpu -a "checkpoints/*.pt" .
 ```
 
 ## Presets
 
-Ephemeral VMs default to capable hardware shapes:
+Every preset spins up an on-demand instance with high network bandwidth and an automated TTL self-destruct guard:
 
-| Preset | Default Flavor | Specs | Disk (GPSSD) |
+| Preset | Default Flavor | Specs | Storage |
 |---|---|---|---|
-| `normal` | `s7n.2xlarge.2` | 8 vCPU / 16 GB | 100 GB |
-| `ram` | `m7.4xlarge.8` | 16 vCPU / 128 GB | 100 GB |
-| `compute` | `c7.8xlarge.2` | 32 vCPU / 64 GB | 100 GB |
-| `gpu` | `pi2.4xlarge.4` | 16 vCPU / 64 GB / 2x T4 | 200 GB |
-| `beefy` | `p2s.8xlarge.8` | 32 vCPU / 256 GB / 4x V100 | 300 GB |
+| `normal` | `s7n.2xlarge.2` | 8 vCPU / 16 GB | 100 GB GPSSD |
+| `ram` | `m7.4xlarge.8` | 16 vCPU / 128 GB | 100 GB GPSSD |
+| `compute` | `c7.8xlarge.2` | 32 vCPU / 64 GB | 100 GB GPSSD |
+| `gpu` | `pi2.4xlarge.4` | 16 vCPU / 64 GB / 2x T4 | 200 GB GPSSD |
+| `beefy` | `p2s.8xlarge.8` | 32 vCPU / 256 GB / 4x V100 | 300 GB GPSSD |
 
-Presets and flavor mappings can be customized in `~/.config/qecs/config.toml`. Ad-hoc overrides can be passed via `--flavor <name>`.
+Override with `--flavor <FLAVOR_ID>` or customize defaults in `~/.config/qecs/config.toml`.
 
-## CLI Commands
+## Core Features
 
-### Execution & Provisioning
-- `qecs run [PATH]`: package workdir, provision VM, run job, download artifacts, destroy.
-  - `-p, --preset <NAME>`: choose hardware preset (`normal`, `ram`, `compute`, `gpu`, `beefy`).
-  - `-f, --flavor <FLAVOR>`: explicit Huawei Cloud flavor ID override.
-  - `-t, --ttl <DURATION>`: execution time limit before guard terminates the machine (default: `1h`).
-  - `-d, --detach`: submit job in background and exit immediately.
-  - `-k, --keep`: keep the VM alive after job execution completes.
-  - `-o, --output <PATH>`: custom destination directory for remote `./out` artifacts.
-  - `-D, --dry-run`: display resolved detector ladder recipe and configuration without provisioning.
-  - `-T, --telemetry`: emit execution phase and network timing trace.
-  - Short boolean flags can be bundled (e.g. `qecs run -dk -p gpu .`).
-- `qecs up`: provision an interactive ephemeral VM and register in local state.
-  - Options: `-p, --preset`, `-n, --name`, `-t, --ttl`, `-D, --dry-run`, `-T, --telemetry`.
-- `qecs shell [VM_ID]`: open an SSH shell (or remote VNC console fallback) into an active VM.
+### Automatic Web Tunnels
+If your script starts a local server (Gradio on `7860`, Streamlit on `8501`, Jupyter on `8888`, FastAPI on `8000`, TensorBoard on `6006`), `qecs` detects the open port and forwards it over encrypted SSH directly to your browser:
 
-### Inspection & Management
-- `qecs ls`: list tracked VMs with status, IPs, and remaining TTL. Add `-j, --json` for machine-readable output.
-- `qecs info [VM_ID]`: display full metadata for a VM including VPC, subnet, AZ, and console URL.
-- `qecs logs [VM_ID]`: stream cloud-init initialization logs or background job output (`-f, --follow`).
-- `qecs wait [VM_ID]`: block until a detached background job finishes and optionally retrieve output.
-- `qecs kill [VM_ID]` (alias: `qecs down`): delete an active VM and release cloud resources. Automatically targets your single active VM when omitted. Use `-a, --all` to terminate all tracked VMs.
-- `qecs gc`: synchronize state with the cloud, detect externally deleted VMs, and purge expired instances.
+```text
+➜ Web UI detected (Gradio): http://localhost:7860
+  Forwarded from remote port 7860 via encrypted SSH tunnel
+```
 
-### Setup & Shell Integration
-- `qecs setup`: interactive credential resolution check and config generation.
-- `qecs presets`: display available presets and active region.
-- `qecs image build`: bake a private IMS image with preinstalled toolchains and GPU drivers for accelerated cold starts.
-- `qecs completion <shell>`: generate shell tab-completion scripts (`bash`, `zsh`, `fish`, `powershell`, `elvish`).
+### Session Resilience & Detach
+All interactive runs execute inside a background multiplexer session. If your Wi-Fi hiccups or laptop sleeps, the remote job keeps running:
 
-## Configuration & Environment
+- Press `Ctrl+B d` during a run to detach and return to your local terminal.
+- Run `qecs attach` to re-enter the session at any time.
 
-Configuration is stored in `~/.config/qecs/config.toml`. Key settings include default region, presets, volume types, and SSH preferences.
+### Dependency Caching
+Dependencies (pip/uv wheels, cargo crates) cache to a regional OBS bucket over free internal VPC bandwidth. Subsequent runs boot in seconds instead of redownloading gigabytes of wheels:
 
-### Environment Variables
+```bash
+qecs cache ls                  # view cached dependency archives
+qecs cache clean               # delete cache objects
+qecs cache destroy --force     # purge cache bucket completely
+```
+Use `--no-cache` on `qecs run` to skip remote cache lookups.
 
-All qecs settings follow the `QECS_<NAME>` convention:
+### Diagnostics on Failure
+If a job exits abnormally, `qecs` inspects kernel logs and process exit status before tearing the machine down:
+- Distinguishes Linux OOM killer (exit 137) from user timeouts.
+- Catches missing `.so` libraries and suggests the matching `apt` package.
+- Use `--keep-on-failure` to pause VM destruction so you can inspect the state.
 
-| Variable | Fallback Alias | Description |
-|---|---|---|
-| `QECS_AK` | `HUAWEICLOUD_SDK_AK`, `HWC_AK` | Access key |
-| `QECS_SK` | `HUAWEICLOUD_SDK_SK`, `HWC_SK` | Secret key |
-| `QECS_SECURITY_TOKEN` | `HWC_SECURITY_TOKEN` | STS session token |
-| `QECS_REGION` | - | Region override (precedence below `--region`, above config) |
-| `QECS_PROFILE` | - | Configuration profile selector |
-| `QECS_TELEMETRY` | - | Set to `1` to enable JSONL telemetry traces |
+## CLI Reference
 
-### Telemetry Tracing
+### Workload Execution
+- `qecs run [PATH]`: sync directory, provision VM, execute, retrieve artifacts, destroy.
+  - `-p, --preset <NAME>`: hardware profile (`normal`, `ram`, `compute`, `gpu`, `beefy`).
+  - `-c, --command <CMD>`: override detector ladder with a custom command.
+  - `-e, --env <KEY=VAL>`: pass environment variables to the remote process.
+  - `--env-file <PATH>`: load variables from a file.
+  - `-a, --artifacts <GLOBS>`: comma-separated output patterns to download locally.
+  - `-d, --detach`: start job in background and exit immediately.
+  - `-k, --keep`: do not terminate the VM after run finishes.
+  - `--keep-on-failure`: retain VM only if exit code is non-zero.
+  - `-- <ARGS>`: pass trailing arguments directly to your application.
+- `qecs attach [TARGET]`: reattach to a running job session.
 
-When running with `--telemetry` (or `QECS_TELEMETRY=1`), qecs writes structured JSONL traces to `~/.local/state/qecs/traces/`. Traces record:
-- Total workflow wall time and metadata (preset, flavor, region, credential source).
-- Millisecond-accurate durations for each provisioning and execution phase.
-- Per-call HTTP latency, status code, request ID, and payload sizes for Huawei Cloud APIs.
-- Poll loop iteration counts and probe timings.
+### Standalone VM Management
+- `qecs up`: boot an on-demand VM with hard TTL limit and idle protection.
+- `qecs shell [VM_ID]`: open an interactive SSH terminal (or VNC console fallback).
+- `qecs ls`: list active VMs, public IPs, and remaining TTL (`-j` for JSON).
+- `qecs logs [VM_ID]`: tail execution logs or cloud-init output (`-f` to stream).
+- `qecs wait [VM_ID]`: block until a detached background job finishes.
+- `qecs kill [VM_ID]` (alias `qecs down`): destroy VM and release public IP. Use `-a, --all` to clean up everything.
+
+### Model Context Protocol (MCP) Server
+`qecs` includes a native stdio MCP server so AI coding assistants (Cursor, Claude Desktop, Antigravity) can run cloud tasks autonomously:
+
+```bash
+qecs mcp serve
+```
+
+Add this to your editor's MCP settings (`claude_desktop_config.json` or `.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "qecs": {
+      "command": "qecs",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+The MCP server exposes tools to run workloads (`qecs_run`), launch machines (`qecs_up`), inspect state (`qecs_ls`, `qecs_info`), stream logs (`qecs_logs`), and terminate resources (`qecs_kill`).
+
+## Configuration
+
+Credentials and defaults live in `~/.config/qecs/config.toml` or environment variables:
+
+| Variable | Description |
+|---|---|
+| `QECS_AK` | Huawei Cloud Access Key (`HWC_AK` alias supported) |
+| `QECS_SK` | Huawei Cloud Secret Key (`HWC_SK` alias supported) |
+| `QECS_REGION` | Default region override (e.g. `ap-southeast-3`, `sa-brazil-1`) |
+| `QECS_PROFILE` | Profile name to load from `.env.<profile>` |
 
 ## Development
 
 ```bash
-# Run unit, mock integration, signer vectors, and CLI e2e tests
-cargo test --all
-
-# Run linter and formatter check
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
-
-# Compile benchmarks
-cargo bench --no-run
+cargo test --all                         # full test suite
+cargo clippy --all-targets -- -D warnings # strict linter check
+cargo fmt --check                        # style check
 ```
 
-Commits must follow Conventional Commits (`feat:`, `fix:`, `docs:`, etc.). The repository post-commit hook automatically manages version bumps in `Cargo.toml`.
+Commits use Conventional Commits (`feat:`, `fix:`, `docs:`) to drive automatic version bumping via git hooks.
 
 ## License
 
-MIT.
+MIT
