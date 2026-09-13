@@ -100,6 +100,30 @@ pub struct RunArgs {
     /// Bypass pre-baked private images and use a fresh base gold image.
     #[arg(long)]
     pub no_baked_image: bool,
+    /// Inline ad-hoc command to execute instead of inferring from detector.
+    #[arg(short = 'c', long)]
+    pub command: Option<String>,
+    /// Keep VM alive only if the job exits with non-zero status.
+    #[arg(long)]
+    pub keep_on_failure: bool,
+    /// Environment variables to inject (e.g. -e KEY=VAL or -e KEY to forward host variable).
+    #[arg(short = 'e', long = "env", value_name = "KEY[=VAL]")]
+    pub env: Vec<String>,
+    /// Load environment variables from a .env file.
+    #[arg(long = "env-file", value_name = "PATH")]
+    pub env_file: Option<PathBuf>,
+    /// Auto-forward well-known AI tokens (HF_TOKEN, WANDB_API_KEY, OPENAI_API_KEY, etc.).
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    pub forward_env: bool,
+    /// Force pseudo-terminal (PTY) allocation.
+    #[arg(long, conflicts_with = "no_pty")]
+    pub pty: bool,
+    /// Disable pseudo-terminal (PTY) allocation.
+    #[arg(long, conflicts_with = "pty")]
+    pub no_pty: bool,
+    /// Trailing arguments passed directly to the run command.
+    #[arg(last = true)]
+    pub args: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -325,6 +349,81 @@ mod tests {
                 name: None
             })
         ));
+    }
+
+    #[test]
+    fn parses_run_with_command_and_env() {
+        let cli = Cli::try_parse_from([
+            "qecs",
+            "run",
+            "-c",
+            "pytest -v",
+            "-e",
+            "FOO=bar",
+            "-e",
+            "LOCAL_VAR",
+            "--env-file",
+            ".env.test",
+            "--keep-on-failure",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Run(a) => {
+                assert_eq!(a.command.as_deref(), Some("pytest -v"));
+                assert_eq!(a.env, vec!["FOO=bar", "LOCAL_VAR"]);
+                assert_eq!(a.env_file, Some(PathBuf::from(".env.test")));
+                assert!(a.keep_on_failure);
+                assert!(a.forward_env);
+                assert!(!a.pty);
+                assert!(!a.no_pty);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn parses_run_with_trailing_args() {
+        let cli = Cli::try_parse_from([
+            "qecs",
+            "run",
+            "train.py",
+            "--",
+            "--epochs",
+            "50",
+            "--batch-size",
+            "32",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Run(a) => {
+                assert_eq!(a.path.unwrap().to_str().unwrap(), "train.py");
+                assert_eq!(a.args, vec!["--epochs", "50", "--batch-size", "32"]);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn parses_run_with_pty_flags() {
+        let cli = Cli::try_parse_from(["qecs", "run", "--pty"]).unwrap();
+        match cli.command {
+            Commands::Run(a) => {
+                assert!(a.pty);
+                assert!(!a.no_pty);
+            }
+            _ => panic!("wrong command"),
+        }
+
+        let cli = Cli::try_parse_from(["qecs", "run", "--no-pty"]).unwrap();
+        match cli.command {
+            Commands::Run(a) => {
+                assert!(!a.pty);
+                assert!(a.no_pty);
+            }
+            _ => panic!("wrong command"),
+        }
+
+        assert!(Cli::try_parse_from(["qecs", "run", "--pty", "--no-pty"]).is_err());
     }
 
     #[test]

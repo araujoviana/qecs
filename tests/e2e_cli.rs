@@ -271,3 +271,46 @@ fn completion_generates_down_for_all_shells() {
         );
     }
 }
+
+#[test]
+fn run_help_shows_new_ergonomic_flags() {
+    qecs().args(["run", "--help"]).assert().success().stdout(
+        predicate::str::contains("--command")
+            .and(predicate::str::contains("--env"))
+            .and(predicate::str::contains("--env-file"))
+            .and(predicate::str::contains("--keep-on-failure"))
+            .and(predicate::str::contains("--pty")),
+    );
+}
+
+#[test]
+fn run_dry_run_with_command_and_trailing_args() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.py"), "print('hi')\n").unwrap();
+
+    qecs()
+        .current_dir(dir.path())
+        .args(["run", "--dry-run", "-c", "pytest", "--", "-v", "-s"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("=== qecs run Dry-Run Plan ===")
+                .and(predicate::str::contains("Run command:    pytest -v -s")),
+        );
+}
+
+#[test]
+fn run_dry_run_with_env_masks_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.py"), "print('hi')\n").unwrap();
+
+    qecs()
+        .current_dir(dir.path())
+        .args(["run", "--dry-run", "-e", "HF_TOKEN=hf_abcdef123456"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Environment variables:")
+                .and(predicate::str::contains("HF_TOKEN=hf_...456")),
+        );
+}

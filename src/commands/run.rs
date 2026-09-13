@@ -27,18 +27,27 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     let target_path = args.path.clone().unwrap_or_else(|| PathBuf::from("."));
     let recipe = detect_recipe(&target_path)?;
 
-    // 2. Handle --dry-run
+    // 2. Resolve ad-hoc command or detected run_command
+    let effective_run_cmd = args
+        .command
+        .clone()
+        .unwrap_or_else(|| recipe.run_command.clone());
+
+    // 3. Collect environment variables
+    let env_vars = collect_env_vars(&args)?;
+
+    // 4. Handle --dry-run
     if args.dry_run {
-        print_dry_run_summary(&recipe, &args);
+        print_dry_run_summary(&recipe, &args, &effective_run_cmd, &env_vars);
         return Ok(());
     }
 
-    // 3. Resolve preset & flavor
+    // 5. Resolve preset & flavor
     let final_preset = args.preset.unwrap_or(recipe.preset);
 
     let (paths, _pub_key) = keys::ensure_keypair(None)?;
 
-    // 4. Provision VM
+    // 6. Provision VM
     let opts = ProvisionOptions {
         preset: Some(final_preset),
         flavor: args.flavor.clone(),
@@ -60,7 +69,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
 
     let _ = keys::remove_known_host(&ip);
 
-    // 5. Await SSH readiness
+    // 7. Await SSH readiness
     let pb = crate::ui::spinner(format!(
         "Waiting for SSH readiness on `{}` ({ip})...",
         vm.name
@@ -83,7 +92,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
 
     let proxy_cmd = relay.proxy_command(&ip, port);
 
-    // 6. Pack & upload workdir
+    // 8. Pack & upload workdir
     let pb = crate::ui::spinner("Packing and uploading workspace...");
     let tarball = ctx.telemetry.phase_sync("workdir-pack", || {
         sync::pack_directory(&recipe.workdir).context("packing workspace")
@@ -101,7 +110,18 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     })?;
     pb.finish_and_clear();
 
-    // 7. Await GPU readiness if GPU preset is active
+    // 9. Stage environment variables if present
+    if !env_vars.is_empty() {
+        execute::stage_env_vars(
+            &ip,
+            port,
+            &paths.private_key,
+            proxy_cmd.as_deref(),
+            &env_vars,
+        )?;
+    }
+
+    // 10. Await GPU readiness if GPU preset is active
     if final_preset.needs_gpu() {
         let pb = crate::ui::spinner(
             "Waiting for NVIDIA GPU driver and container toolkit installation (~4-8m)...",
@@ -127,7 +147,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         );
     }
 
-    // 8. Execution: Detached vs Attached
+    // 11. Execution: Detached vs Attached
     if args.detach {
         ctx.telemetry.phase_sync("job-exec", || {
             execute::execute_job_detached(
@@ -137,7 +157,8 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
                 proxy_cmd.as_deref(),
                 "/home/ubuntu/workspace",
                 &recipe.setup_commands,
-                &recipe.run_command,
+                &effective_run_cmd,
+                &args.args,
                 &recipe.output_dir,
             )
         })?;
@@ -161,11 +182,19 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         "{}",
         format!(
             "▶ Running `{}` ({}) on `{}`...",
-            recipe.run_command, recipe.name, vm.name
+            effective_run_cmd, recipe.name, vm.name
         )
         .cyan()
         .bold()
     );
+
+    let pty_opt = if args.pty {
+        Some(true)
+    } else if args.no_pty {
+        Some(false)
+    } else {
+        None
+    };
 
     let exit_code = ctx.telemetry.phase_sync("job-exec", || {
         execute::execute_job_attached(
@@ -175,11 +204,32 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
             proxy_cmd.as_deref(),
             "/home/ubuntu/workspace",
             &recipe.setup_commands,
-            &recipe.run_command,
+            &effective_run_cmd,
+            &args.args,
+            pty_opt,
         )
     })?;
 
-    // 8. Pull output artifacts
+    // 12. Post-mortem diagnostics BEFORE VM teardown
+    let diagnostic = if exit_code != 0 {
+        crate::run::diagnostics::inspect_failure(
+            &ip,
+            port,
+            &paths.private_key,
+            proxy_cmd.as_deref(),
+            exit_code,
+            &[],
+            final_preset,
+            args.flavor
+                .as_deref()
+                .unwrap_or_else(|| final_preset.as_str()),
+            &vm.name,
+        )
+    } else {
+        None
+    };
+
+    // 13. Pull output artifacts
     let local_output_dir = args
         .output
         .unwrap_or_else(|| recipe.workdir.join(&recipe.output_dir));
@@ -216,12 +266,13 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         }
     }
 
-    // 9. Auto-destruction
-    if args.keep {
-        println!(
-            "{}",
-            format!("Note: VM `{}` kept alive (--keep specified).", vm.name).dimmed()
-        );
+    // 14. Auto-destruction decision
+    let should_keep = args.keep || (args.keep_on_failure && exit_code != 0);
+    if should_keep {
+        println!("{}", format!("Note: VM `{}` kept alive.", vm.name).dimmed());
+        if exit_code != 0 {
+            println!("  Debug with interactive shell: qecs shell {}", vm.name);
+        }
     } else {
         let pb = crate::ui::spinner(format!("Tearing down VM `{}`...", vm.name));
         destroy_vm(ctx, &vm.id, &vm.name).await?;
@@ -232,6 +283,11 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         );
     }
 
+    // Render diagnostic report if present
+    if let Some(ref report) = diagnostic {
+        report.render_cargo_style();
+    }
+
     if exit_code != 0 {
         return Err(crate::error::ExitCode(exit_code).into());
     }
@@ -239,7 +295,74 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_dry_run_summary(recipe: &RunRecipe, args: &RunArgs) {
+const WELL_KNOWN_ENV_VARS: &[&str] = &[
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "WANDB_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_DEFAULT_REGION",
+    "GITHUB_TOKEN",
+];
+
+fn collect_env_vars(args: &RunArgs) -> anyhow::Result<Vec<(String, String)>> {
+    let mut env_map = std::collections::BTreeMap::new();
+
+    // 1. Load --env-file if specified
+    if let Some(ref env_path) = args.env_file {
+        let content = std::fs::read_to_string(env_path)
+            .with_context(|| format!("failed to read --env-file `{}`", env_path.display()))?;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = trimmed.split_once('=') {
+                let val = v.trim_matches(|c| c == '\'' || c == '"');
+                env_map.insert(k.trim().to_string(), val.to_string());
+            }
+        }
+    }
+
+    // 2. Auto-forward well-known variables if forward_env is true
+    if args.forward_env {
+        for &var_name in WELL_KNOWN_ENV_VARS {
+            if let Ok(val) = std::env::var(var_name)
+                && !val.trim().is_empty()
+            {
+                env_map.insert(var_name.to_string(), val);
+            }
+        }
+    }
+
+    // 3. Explicit -e / --env flags
+    for entry in &args.env {
+        if let Some((k, v)) = entry.split_once('=') {
+            env_map.insert(k.trim().to_string(), v.to_string());
+        } else if let Ok(val) = std::env::var(entry) {
+            env_map.insert(entry.clone(), val);
+        }
+    }
+
+    Ok(env_map.into_iter().collect())
+}
+
+fn mask_token(val: &str) -> String {
+    if val.len() <= 6 {
+        "***".to_string()
+    } else {
+        format!("{}...{}", &val[..3], &val[val.len() - 3..])
+    }
+}
+
+fn print_dry_run_summary(
+    recipe: &RunRecipe,
+    args: &RunArgs,
+    effective_run_cmd: &str,
+    env_vars: &[(String, String)],
+) {
     println!("{}", "=== qecs run Dry-Run Plan ===".green().bold());
     println!("  Workdir:        {}", recipe.workdir.display());
     println!("  Detector:       {}", recipe.name);
@@ -251,16 +374,30 @@ fn print_dry_run_summary(recipe: &RunRecipe, args: &RunArgs) {
     if let Some(ref flavor) = args.flavor {
         println!("  Flavor:         {}", flavor);
     }
+    if !env_vars.is_empty() {
+        println!("  Environment variables:");
+        for (k, v) in env_vars {
+            println!("    - {}={}", k, mask_token(v));
+        }
+    }
     if !recipe.setup_commands.is_empty() {
         println!("  Setup commands:");
         for cmd in &recipe.setup_commands {
             println!("    - {}", cmd);
         }
     }
-    println!("  Run command:    {}", recipe.run_command);
+    if args.args.is_empty() {
+        println!("  Run command:    {}", effective_run_cmd);
+    } else {
+        println!(
+            "  Run command:    {} {}",
+            effective_run_cmd,
+            args.args.join(" ")
+        );
+    }
     println!("  Output dir:     {}", recipe.output_dir);
     println!("  Detached:       {}", args.detach);
-    println!("  Keep VM:        {}", args.keep);
+    println!("  Keep VM:        {}", args.keep || args.keep_on_failure);
 }
 
 pub async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Result<()> {

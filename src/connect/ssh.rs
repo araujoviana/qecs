@@ -10,6 +10,17 @@ pub fn build_ssh_args(
     key_path: &Path,
     proxy_command: Option<&str>,
 ) -> Vec<String> {
+    build_ssh_args_ext(ip, port, key_path, proxy_command, None)
+}
+
+/// Build common SSH command-line arguments with optional PTY allocation.
+pub fn build_ssh_args_ext(
+    ip: &str,
+    port: u16,
+    key_path: &Path,
+    proxy_command: Option<&str>,
+    pty: Option<bool>,
+) -> Vec<String> {
     // Host-key verification stays on (trust-on-first-use), but in a qecs-owned
     // known_hosts file so ephemeral VMs churning a recycled elastic-IP pool
     // never wedge the user's ~/.ssh/known_hosts. BatchMode keeps a failed key
@@ -39,6 +50,14 @@ pub fn build_ssh_args(
         "LogLevel=ERROR".to_string(),
     ];
 
+    if let Some(enable_pty) = pty {
+        if enable_pty {
+            args.insert(0, "-t".to_string());
+        } else {
+            args.insert(0, "-T".to_string());
+        }
+    }
+
     if let Some(proxy) = proxy_command {
         args.push("-o".to_string());
         args.push(format!("ProxyCommand={proxy}"));
@@ -55,11 +74,18 @@ pub fn build_ssh_command(
     key_path: &Path,
     proxy_command: Option<&str>,
 ) -> Command {
-    // Stale host keys for recycled elastic IPs are evicted once per VM, at the
-    // call sites that first connect (run/up/shell) and when a VM is destroyed
-    // (kill/gc/wait). Doing it here on every exec would re-TOFU each connection
-    // and turn `StrictHostKeyChecking=accept-new` into unconditional accept.
-    let args = build_ssh_args(ip, port, key_path, proxy_command);
+    build_ssh_command_ext(ip, port, key_path, proxy_command, None)
+}
+
+/// Build a configured `std::process::Command` ready to execute or customize, with optional PTY.
+pub fn build_ssh_command_ext(
+    ip: &str,
+    port: u16,
+    key_path: &Path,
+    proxy_command: Option<&str>,
+    pty: Option<bool>,
+) -> Command {
+    let args = build_ssh_args_ext(ip, port, key_path, proxy_command, pty);
     let mut cmd = Command::new("ssh");
     cmd.args(&args);
     cmd
@@ -130,5 +156,19 @@ mod tests {
         let args = build_ssh_args("1.2.3.4", 22, &key, Some("nc -X 5 -x 127.0.0.1:1080 %h %p"));
         assert!(args.contains(&"ProxyCommand=nc -X 5 -x 127.0.0.1:1080 %h %p".to_string()));
         assert_eq!(args.last().unwrap(), "ubuntu@1.2.3.4");
+    }
+
+    #[test]
+    fn builds_ssh_arguments_with_pty_options() {
+        let key = PathBuf::from("/k");
+        let args_pty = build_ssh_args_ext("1.2.3.4", 22, &key, None, Some(true));
+        assert_eq!(args_pty[0], "-t");
+
+        let args_no_pty = build_ssh_args_ext("1.2.3.4", 22, &key, None, Some(false));
+        assert_eq!(args_no_pty[0], "-T");
+
+        let args_default = build_ssh_args_ext("1.2.3.4", 22, &key, None, None);
+        assert_ne!(args_default[0], "-t");
+        assert_ne!(args_default[0], "-T");
     }
 }

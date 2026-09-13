@@ -1,6 +1,6 @@
 [package]
 name = "qecs"
-version = "0.32.5"
+version = "0.33.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
