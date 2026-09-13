@@ -279,6 +279,7 @@ fn run_help_shows_new_ergonomic_flags() {
             .and(predicate::str::contains("--env"))
             .and(predicate::str::contains("--env-file"))
             .and(predicate::str::contains("--keep-on-failure"))
+            .and(predicate::str::contains("--artifacts"))
             .and(predicate::str::contains("--pty")),
     );
 }
@@ -312,5 +313,22 @@ fn run_dry_run_with_env_masks_secrets() {
         .stdout(
             predicate::str::contains("Environment variables:")
                 .and(predicate::str::contains("HF_TOKEN=hf_...456")),
+        );
+}
+
+#[test]
+fn run_dry_run_with_artifacts_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.py"), "print('hi')\n").unwrap();
+
+    qecs()
+        .current_dir(dir.path())
+        .args(["run", "--dry-run", "-a", "models/*.pt,results.json"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("=== qecs run Dry-Run Plan ===").and(
+                predicate::str::contains("Artifacts:      models/*.pt,results.json"),
+            ),
         );
 }

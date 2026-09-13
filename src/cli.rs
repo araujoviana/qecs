@@ -95,6 +95,9 @@ pub struct RunArgs {
     pub keep: bool,
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+    /// Artifact file(s), directory, or glob pattern to retrieve (e.g. "out", "results.json", "models/*.pt").
+    #[arg(short = 'a', long = "artifacts")]
+    pub artifacts: Option<String>,
     #[arg(short = 'D', long)]
     pub dry_run: bool,
     /// Bypass pre-baked private images and use a fresh base gold image.
@@ -424,6 +427,17 @@ mod tests {
         }
 
         assert!(Cli::try_parse_from(["qecs", "run", "--pty", "--no-pty"]).is_err());
+    }
+
+    #[test]
+    fn parses_run_with_artifacts_flag() {
+        let cli = Cli::try_parse_from(["qecs", "run", "-a", "models/*.pt,results.json"]).unwrap();
+        match cli.command {
+            Commands::Run(a) => {
+                assert_eq!(a.artifacts.as_deref(), Some("models/*.pt,results.json"));
+            }
+            _ => panic!("wrong command"),
+        }
     }
 
     #[test]

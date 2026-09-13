@@ -92,21 +92,18 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
 
     let proxy_cmd = relay.proxy_command(&ip, port);
 
-    // 8. Pack & upload workdir
-    let pb = crate::ui::spinner("Packing and uploading workspace...");
-    let tarball = ctx.telemetry.phase_sync("workdir-pack", || {
-        sync::pack_directory(&recipe.workdir).context("packing workspace")
-    })?;
-    ctx.telemetry.phase_sync("workdir-upload", || {
-        sync::upload_workdir(
+    // 8. Stream workspace directly to VM (constant memory)
+    let pb = crate::ui::spinner("Streaming workspace to VM...");
+    ctx.telemetry.phase_sync("workdir-stream", || {
+        sync::stream_workdir(
             &ip,
             port,
             &paths.private_key,
             proxy_cmd.as_deref(),
-            &tarball,
+            &recipe.workdir,
             "/home/ubuntu/workspace",
         )
-        .context("uploading workspace to VM")
+        .context("streaming workspace to VM")
     })?;
     pb.finish_and_clear();
 
@@ -148,6 +145,8 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     }
 
     // 11. Execution: Detached vs Attached
+    let artifact_spec = args.artifacts.as_deref().unwrap_or(&recipe.output_dir);
+
     if args.detach {
         ctx.telemetry.phase_sync("job-exec", || {
             execute::execute_job_detached(
@@ -159,7 +158,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
                 &recipe.setup_commands,
                 &effective_run_cmd,
                 &args.args,
-                &recipe.output_dir,
+                artifact_spec,
             )
         })?;
 
@@ -242,7 +241,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
             &paths.private_key,
             proxy_cmd.as_deref(),
             "/home/ubuntu/workspace",
-            &recipe.output_dir,
+            artifact_spec,
             &local_output_dir,
         )
     });
@@ -395,7 +394,11 @@ fn print_dry_run_summary(
             args.args.join(" ")
         );
     }
-    println!("  Output dir:     {}", recipe.output_dir);
+    if let Some(ref artifacts) = args.artifacts {
+        println!("  Artifacts:      {}", artifacts);
+    } else {
+        println!("  Output dir:     {}", recipe.output_dir);
+    }
     println!("  Detached:       {}", args.detach);
     println!("  Keep VM:        {}", args.keep || args.keep_on_failure);
 }

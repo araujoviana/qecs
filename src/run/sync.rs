@@ -1,4 +1,4 @@
-//! Workdir synchronization over SSH: in-memory tarball streaming and artifact retrieval.
+//! Workdir synchronization over SSH: pipelined streaming tarball upload and artifact retrieval.
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -9,112 +9,169 @@ use anyhow::Context;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use ignore::WalkBuilder;
+use ignore::overrides::OverrideBuilder;
 use tar::{Archive, Builder};
 
 /// Default directory and file patterns ignored when packing the workspace.
-const DEFAULT_IGNORES: &[&str] = &[
-    ".git",
-    ".qecs",
-    "target",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    ".env",
-    ".superpowers",
+pub const DEFAULT_IGNORES: &[&str] = &[
+    "!.git",
+    "!.git/**",
+    "!.qecs",
+    "!.qecs/**",
+    "!target",
+    "!target/**",
+    "!node_modules",
+    "!node_modules/**",
+    "!__pycache__",
+    "!__pycache__/**",
+    "!.venv",
+    "!.venv/**",
+    "!venv",
+    "!venv/**",
+    "!.superpowers",
+    "!.superpowers/**",
+    "!.env*",
+    "!*.pem",
+    "!*.key",
+    "!id_rsa*",
+    "!id_ed25519*",
 ];
 
-/// Collect ignore patterns from standard list plus `.gitignore` and `.qecsignore`.
-fn collect_ignore_patterns(root: &Path) -> Vec<String> {
-    let mut patterns: Vec<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-
-    for ignore_file in &[".gitignore", ".qecsignore"] {
-        let path = root.join(ignore_file);
-        if let Ok(content) = fs::read_to_string(&path) {
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                    // Normalize leading / or trailing /
-                    let p = trimmed.trim_start_matches('/').trim_end_matches('/');
-                    patterns.push(p.to_string());
-                }
-            }
-        }
+/// Build an `ignore::Walk` iterator configured for workspace packing.
+///
+/// Respects `.gitignore`, `.qecsignore`, and user global git ignores even without a `.git` dir,
+/// while excluding heavy build/cache directories and sensitive secrets.
+pub fn build_walker(root: &Path) -> anyhow::Result<ignore::Walk> {
+    let mut ob = OverrideBuilder::new(root);
+    for pattern in DEFAULT_IGNORES {
+        ob.add(pattern)
+            .with_context(|| format!("adding default override pattern `{pattern}`"))?;
     }
+    let overrides = ob.build().context("building ignore overrides")?;
 
-    patterns
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false) // Don't blindly hide dotfiles (.cargo, .github, etc.)
+        .parents(true) // Respect parent ignore rules
+        .git_ignore(true) // Respect .gitignore
+        .git_global(true) // Respect user's global gitignore
+        .git_exclude(true) // Respect .git/info/exclude
+        .require_git(false) // Parse .gitignore even in non-git directories
+        .follow_links(false) // Never follow symlinks (security)
+        .overrides(overrides);
+
+    // Support custom .qecsignore in gitignore format
+    builder.add_custom_ignore_filename(".qecsignore");
+
+    Ok(builder.build())
 }
 
-/// Determine whether a given relative path should be excluded.
-fn should_exclude(rel_path: &Path, patterns: &[String]) -> bool {
-    let rel_str = rel_path.to_string_lossy();
-
-    // Sensitive files like private keys and env files
-    if rel_str.starts_with(".env") || rel_str.ends_with(".pem") || rel_str.ends_with(".key") {
-        return true;
-    }
-
-    for comp in rel_path.components() {
-        let comp_str = comp.as_os_str().to_string_lossy();
-        for pattern in patterns {
-            if comp_str == *pattern
-                || rel_str == *pattern
-                || rel_str.starts_with(&format!("{pattern}/"))
-            {
-                return true;
-            }
-        }
-    }
-
-    false
+/// Helper to check if a filename matches sensitive secret patterns.
+fn is_sensitive_filename(name: &str) -> bool {
+    name.starts_with(".env")
+        || name.ends_with(".pem")
+        || name.ends_with(".key")
+        || name.starts_with("id_rsa")
+        || name.starts_with("id_ed25519")
 }
 
-/// Pack the given `root` directory into an in-memory gzipped tarball, respecting ignore patterns.
-pub fn pack_directory(root: &Path) -> anyhow::Result<Vec<u8>> {
-    let patterns = collect_ignore_patterns(root);
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+/// Pack the given `root` directory into a stream, writing directly to `writer`.
+///
+/// Traverses using ripgrep's `ignore` crate, compressing on the fly with fast gzip.
+/// Memory usage is constant (buffers only current chunks), eliminating RAM spikes.
+pub fn pack_directory_stream<W: Write>(root: &Path, writer: W) -> anyhow::Result<()> {
+    let mut encoder = GzEncoder::new(writer, Compression::fast());
     {
         let mut tar = Builder::new(&mut encoder);
         tar.follow_symlinks(false);
 
-        walk_and_pack(&mut tar, root, root, &patterns)?;
-        tar.finish().context("finishing tarball")?;
-    }
+        let walker = build_walker(root)?;
+        for result in walker {
+            let entry = match result {
+                Ok(e) => e,
+                Err(err) => {
+                    log::debug!("skipping unreadable entry during pack: {err}");
+                    continue;
+                }
+            };
 
-    let compressed = encoder.finish().context("compressing tarball")?;
-    Ok(compressed)
-}
+            // Never follow or include symlinks (prevents symlink-based secret smuggling)
+            if entry.path_is_symlink() {
+                continue;
+            }
 
-fn walk_and_pack<W: Write>(
-    tar: &mut Builder<W>,
-    root: &Path,
-    current_dir: &Path,
-    patterns: &[String],
-) -> anyhow::Result<()> {
-    let entries = fs::read_dir(current_dir).context("reading directory")?;
+            match entry.file_type() {
+                Some(ft) if ft.is_file() => {}
+                _ => continue,
+            }
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let rel_path = path.strip_prefix(root).unwrap_or(&path);
+            let path = entry.path();
+            let rel_path = match path.strip_prefix(root) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
 
-        if should_exclude(rel_path, patterns) {
-            continue;
-        }
+            let file_name = entry.file_name().to_string_lossy();
+            if is_sensitive_filename(&file_name) {
+                continue;
+            }
 
-        // Skip symlinks: `path.is_file()` follows them, which would pack the
-        // contents of whatever they point at (e.g. a link to /etc/passwd or a
-        // path outside the workdir) under the link's own name.
-        if path.is_symlink() {
-            continue;
-        }
-
-        if path.is_dir() {
-            walk_and_pack(tar, root, &path, patterns)?;
-        } else if path.is_file() {
-            let mut file = File::open(&path).context("opening file for tar")?;
+            let mut file =
+                File::open(path).with_context(|| format!("opening file `{}`", path.display()))?;
             tar.append_file(rel_path, &mut file)
                 .with_context(|| format!("adding `{}` to tar", rel_path.display()))?;
         }
+
+        tar.finish().context("finishing tarball stream")?;
+    }
+
+    let mut inner = encoder.finish().context("compressing tarball stream")?;
+    inner.flush().context("flushing compressed stream")?;
+    Ok(())
+}
+
+/// Pack the given `root` directory into an in-memory gzipped tarball, respecting ignore patterns.
+/// Retained for backward compatibility and tests.
+pub fn pack_directory(root: &Path) -> anyhow::Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    pack_directory_stream(root, &mut buffer)?;
+    Ok(buffer)
+}
+
+/// Stream workspace directly to remote VM via SSH stdin without loading entire tarball into RAM.
+pub fn stream_workdir(
+    ip: &str,
+    port: u16,
+    key_path: &Path,
+    proxy_command: Option<&str>,
+    root: &Path,
+    remote_dir: &str,
+) -> anyhow::Result<()> {
+    let remote_cmd = format!("mkdir -p '{remote_dir}' && tar -xzf - -C '{remote_dir}'");
+
+    let mut child = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
+        .arg(&remote_cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("spawning SSH to stream workspace")?;
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("failed to capture SSH stdin"))?;
+
+    // Pipe directly with 512KB buffer
+    let buf_writer = std::io::BufWriter::with_capacity(512 * 1024, stdin);
+    pack_directory_stream(root, buf_writer)?;
+
+    let status = child
+        .wait()
+        .context("waiting for SSH streaming upload to complete")?;
+    if !status.success() {
+        anyhow::bail!("SSH workspace streaming upload failed with exit status: {status}");
     }
 
     Ok(())
@@ -153,19 +210,69 @@ pub fn upload_workdir(
     Ok(())
 }
 
+/// Build shell test to verify remote output artifacts exist.
+/// Supports a single directory, single file, or comma-separated targets/globs.
+pub fn build_remote_artifact_check_cmd(remote_dir: &str, target_spec: &str) -> String {
+    let targets: Vec<&str> = target_spec
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if targets.len() == 1 && !targets[0].contains('*') && !targets[0].contains('?') {
+        let t = targets[0];
+        format!(
+            "[ -d '{remote_dir}/{t}' ] && [ \"$(ls -A '{remote_dir}/{t}' 2>/dev/null)\" ] || [ -f '{remote_dir}/{t}' ]"
+        )
+    } else {
+        let targets_joined = targets
+            .iter()
+            .map(|t| format!("'{t}'"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "cd '{remote_dir}' && {{ for t in {targets_joined}; do for f in $t; do if [ -e \"$f\" ]; then exit 0; fi; done; done; exit 1; }}"
+        )
+    }
+}
+
+/// Build shell command to stream matching remote output artifacts as a gzipped tarball.
+/// Supports a single directory (extracts its contents), single file, or comma-separated targets/globs.
+pub fn build_remote_artifact_stream_cmd(remote_dir: &str, target_spec: &str) -> String {
+    let targets: Vec<&str> = target_spec
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if targets.len() == 1 && !targets[0].contains('*') && !targets[0].contains('?') {
+        let t = targets[0];
+        format!(
+            "cd '{remote_dir}' && if [ -d '{t}' ]; then tar -czf - -C '{remote_dir}/{t}' .; else tar -czf - -C '{remote_dir}' '{t}'; fi"
+        )
+    } else {
+        let targets_joined = targets
+            .iter()
+            .map(|t| format!("'{t}'"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "cd '{remote_dir}' && shopt -s nullglob && FILES=() && for t in {targets_joined}; do for f in $t; do [ -e \"$f\" ] && FILES+=(\"$f\"); done; done && [ ${{#FILES[@]}} -gt 0 ] && tar -czf - \"${{FILES[@]}}\""
+        )
+    }
+}
+
 /// Shell test that the remote output directory exists and is non-empty.
-fn remote_output_check_cmd(remote_dir: &str, output_subdir: &str) -> String {
-    let dir = format!("{remote_dir}/{output_subdir}");
-    format!("[ -d '{dir}' ] && [ \"$(ls -A '{dir}' 2>/dev/null)\" ]")
+pub fn remote_output_check_cmd(remote_dir: &str, output_subdir: &str) -> String {
+    build_remote_artifact_check_cmd(remote_dir, output_subdir)
 }
 
 /// Shell command that streams the remote output directory back as a gzipped tarball.
-fn remote_output_stream_cmd(remote_dir: &str, output_subdir: &str) -> String {
-    let dir = format!("{remote_dir}/{output_subdir}");
-    format!("tar -czf - -C '{dir}' .")
+pub fn remote_output_stream_cmd(remote_dir: &str, output_subdir: &str) -> String {
+    build_remote_artifact_stream_cmd(remote_dir, output_subdir)
 }
 
-/// Download the recipe's output directory (relative to `remote_dir`) if it exists.
+/// Download the recipe's output artifacts (relative to `remote_dir`) if any exist.
 /// Returns `Ok(true)` if artifacts were found and downloaded, `Ok(false)` if none were generated.
 pub fn download_output(
     ip: &str,
@@ -173,22 +280,20 @@ pub fn download_output(
     key_path: &Path,
     proxy_command: Option<&str>,
     remote_dir: &str,
-    output_subdir: &str,
+    target_spec: &str,
     local_out: &Path,
 ) -> anyhow::Result<bool> {
-    // Check if remote output dir exists and contains files
-    let check_cmd = remote_output_check_cmd(remote_dir, output_subdir);
+    let check_cmd = build_remote_artifact_check_cmd(remote_dir, target_spec);
     let check_status = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
         .arg(&check_cmd)
         .status()
-        .context("checking remote output directory")?;
+        .context("checking remote output artifacts")?;
 
     if !check_status.success() {
         return Ok(false);
     }
 
-    // Stream tarball back
-    let remote_stream_cmd = remote_output_stream_cmd(remote_dir, output_subdir);
+    let remote_stream_cmd = build_remote_artifact_stream_cmd(remote_dir, target_spec);
     let mut child = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
         .arg(&remote_stream_cmd)
         .stdout(Stdio::piped())
@@ -279,7 +384,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         fs::write(root.join("real.txt"), "hi\n").unwrap();
-        // a symlink pointing outside the workdir must not smuggle its target in
         symlink(&secret, root.join("link-to-secret")).unwrap();
 
         let bytes = pack_directory(root).unwrap();
@@ -300,6 +404,28 @@ mod tests {
     }
 
     #[test]
+    fn packs_directory_with_qecsignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("run.py"), "print('run')\n").unwrap();
+        fs::write(root.join("dataset.csv"), "1,2,3\n").unwrap();
+        fs::write(root.join(".qecsignore"), "*.csv\n").unwrap();
+
+        let bytes = pack_directory(root).unwrap();
+        let decoder = GzDecoder::new(&bytes[..]);
+        let mut archive = Archive::new(decoder);
+        let entries: Vec<PathBuf> = archive
+            .entries()
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path().unwrap().to_path_buf()))
+            .collect();
+
+        assert!(entries.iter().any(|p| p == Path::new("run.py")));
+        assert!(!entries.iter().any(|p| p == Path::new("dataset.csv")));
+    }
+
+    #[test]
     fn output_commands_target_the_recipe_output_subdir_not_a_hardcoded_out() {
         let check = remote_output_check_cmd("/home/ubuntu/workspace", "results");
         assert!(check.contains("/home/ubuntu/workspace/results"));
@@ -313,5 +439,16 @@ mod tests {
     fn output_commands_default_subdir_is_out() {
         let check = remote_output_check_cmd("/home/ubuntu/workspace", "out");
         assert!(check.contains("/home/ubuntu/workspace/out"));
+    }
+
+    #[test]
+    fn multi_target_artifact_commands() {
+        let check = build_remote_artifact_check_cmd("/workspace", "models/*.pt,results.json");
+        assert!(check.contains("for t in 'models/*.pt' 'results.json'"));
+        assert!(check.contains("cd '/workspace'"));
+
+        let stream = build_remote_artifact_stream_cmd("/workspace", "models/*.pt,results.json");
+        assert!(stream.contains("shopt -s nullglob"));
+        assert!(stream.contains("for t in 'models/*.pt' 'results.json'"));
     }
 }

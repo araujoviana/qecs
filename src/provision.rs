@@ -244,6 +244,7 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
         user_data_b64: Some(&user_data_b64),
         auto_terminate: Some(&auto_terminate_time),
         eip: true,
+        eip_bandwidth_mbps: ctx.config.network.bandwidth_mbps,
         tags: &[("managed-by", "qecs"), ("preset", &preset_str)],
     };
 

@@ -17,6 +17,22 @@ pub struct Config {
     pub relay: Option<RelayConfig>,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    #[serde(default)]
+    pub network: NetworkConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct NetworkConfig {
+    pub bandwidth_mbps: u32,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            bandwidth_mbps: 300,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -88,6 +104,7 @@ impl Default for Config {
             env_files: default_env_files(),
             relay: None,
             telemetry: TelemetryConfig::default(),
+            network: NetworkConfig::default(),
         }
     }
 }
@@ -230,5 +247,21 @@ port = 7835
 
         let default_cfg = Config::default();
         assert!(!default_cfg.telemetry.enabled);
+    }
+
+    #[test]
+    fn network_config_defaults_to_300_and_parses() {
+        let default_cfg = Config::default();
+        assert_eq!(default_cfg.network.bandwidth_mbps, 300);
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("network.toml");
+        let toml_str = r#"
+[network]
+bandwidth_mbps = 500
+"#;
+        std::fs::write(&p, toml_str).unwrap();
+        let cfg = load_config(Some(&p)).unwrap();
+        assert_eq!(cfg.network.bandwidth_mbps, 500);
     }
 }

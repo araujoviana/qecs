@@ -121,6 +121,8 @@ pub struct CreateServer<'a> {
     pub auto_terminate: Option<&'a str>,
     /// When `true`, request an inline dynamic-BGP EIP that dies with the VM.
     pub eip: bool,
+    /// EIP bandwidth in Mbps (defaults to 300 if 0).
+    pub eip_bandwidth_mbps: u32,
     /// `(key, value)` server tags; the `server_tags` key is omitted when empty.
     pub tags: &'a [(&'a str, &'a str)],
 }
@@ -151,12 +153,17 @@ impl CreateServer<'_> {
             server.insert("auto_terminate_time".into(), json!(at));
         }
         if self.eip {
+            let bw = if self.eip_bandwidth_mbps > 0 {
+                self.eip_bandwidth_mbps
+            } else {
+                300
+            };
             server.insert(
                 "publicip".into(),
                 json!({
                     "eip": {
                         "iptype": "5_bgp",
-                        "bandwidth": { "size": 100, "sharetype": "PER", "chargemode": "traffic" },
+                        "bandwidth": { "size": bw, "sharetype": "PER", "chargemode": "traffic" },
                     },
                     "delete_on_termination": true,
                 }),
@@ -415,6 +422,7 @@ mod tests {
             user_data_b64: None,
             auto_terminate: None,
             eip: false,
+            eip_bandwidth_mbps: 0,
             tags: &[],
         }
     }
@@ -435,6 +443,7 @@ mod tests {
             user_data_b64: Some("YmFzZTY0"),
             auto_terminate: Some("2026-09-06T14:00:00Z"),
             eip: true,
+            eip_bandwidth_mbps: 0,
             tags: &[("managed-by", "qecs")],
         };
         let b = spec.body(false);
@@ -447,9 +456,19 @@ mod tests {
         assert_eq!(s["user_data"], "YmFzZTY0");
         assert_eq!(s["auto_terminate_time"], "2026-09-06T14:00:00Z");
         assert_eq!(s["publicip"]["eip"]["iptype"], "5_bgp");
+        assert_eq!(s["publicip"]["eip"]["bandwidth"]["size"], 300);
         assert_eq!(s["publicip"]["delete_on_termination"], true);
         assert_eq!(s["server_tags"][0]["key"], "managed-by");
         assert!(b.get("dry_run").is_none());
+    }
+
+    #[test]
+    fn custom_eip_bandwidth_is_serialized() {
+        let mut spec = minimal_spec();
+        spec.eip = true;
+        spec.eip_bandwidth_mbps = 500;
+        let b = spec.body(false);
+        assert_eq!(b["server"]["publicip"]["eip"]["bandwidth"]["size"], 500);
     }
 
     #[test]
