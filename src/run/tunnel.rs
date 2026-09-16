@@ -151,8 +151,36 @@ pub struct ControlMasterSession {
     pub proxy_command: Option<String>,
 }
 
+/// Resolve a safe, short, user-isolated UNIX domain socket path for OpenSSH ControlMaster.
+/// Guarantees path length stays well below Darwin (104) and Linux (108) limits.
+pub fn safe_control_socket_path(vm_name: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let base_dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::cache_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("qecs")
+        });
+
+    let sock_dir = base_dir.join("socks");
+    let _ = std::fs::create_dir_all(&sock_dir);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&sock_dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(vm_name.as_bytes());
+    let hash_prefix = &hex::encode(hasher.finalize())[..12];
+
+    sock_dir.join(format!("c-{hash_prefix}.sock"))
+}
+
 impl ControlMasterSession {
-    /// Construct a new session descriptor with a safe short socket path in `/tmp`.
+    /// Construct a new session descriptor with a safe short socket path.
     pub fn new(
         vm_name: &str,
         ip: &str,
@@ -160,17 +188,7 @@ impl ControlMasterSession {
         key_path: &Path,
         proxy_command: Option<&str>,
     ) -> Self {
-        let clean_name: String = vm_name
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        let socket_path = PathBuf::from(format!("/tmp/qecs-ctl-{clean_name}.sock"));
+        let socket_path = safe_control_socket_path(vm_name);
 
         Self {
             socket_path,

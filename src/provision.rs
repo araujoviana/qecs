@@ -157,14 +157,16 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
         .context("ensuring VPC")?;
 
     // B: Run independent ensures concurrently (Subnet, Security Group + rules, Keypair, Image)
+    let subnet_name = format!("qecs-{az}");
+    let (subnet_cidr, subnet_gw) = vpc::az_subnet_cidr_and_gateway(&az);
     let subnet_fut = vpc::ensure_subnet(
         &client,
         &region,
         &project.id,
         &vpc.id,
-        "qecs",
-        "192.168.0.0/24",
-        "192.168.0.1",
+        &subnet_name,
+        &subnet_cidr,
+        &subnet_gw,
         &az,
     );
 

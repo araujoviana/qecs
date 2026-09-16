@@ -1,17 +1,28 @@
 //! Workdir synchronization over SSH: pipelined streaming tarball upload and artifact retrieval.
 
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Stdio;
 
 use anyhow::Context;
-use flate2::Compression;
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
 use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
 use tar::{Archive, Builder};
+
+/// Transparently decompress a stream whether it is compressed with zstd or gzip.
+pub fn decompress_stream<'a, R: Read + 'a>(mut reader: R) -> anyhow::Result<Box<dyn Read + 'a>> {
+    let mut magic = [0u8; 4];
+    let n = reader.read(&mut magic)?;
+    let combined = std::io::Cursor::new(magic[..n].to_vec()).chain(reader);
+    if n >= 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+        Ok(Box::new(flate2::read::GzDecoder::new(combined)))
+    } else {
+        let decoder =
+            zstd::stream::read::Decoder::new(combined).context("initializing zstd decoder")?;
+        Ok(Box::new(decoder))
+    }
+}
 
 /// Default directory and file patterns ignored when packing the workspace.
 pub const DEFAULT_IGNORES: &[&str] = &[
@@ -78,10 +89,12 @@ fn is_sensitive_filename(name: &str) -> bool {
 
 /// Pack the given `root` directory into a stream, writing directly to `writer`.
 ///
-/// Traverses using ripgrep's `ignore` crate, compressing on the fly with fast gzip.
+/// Traverses using ripgrep's `ignore` crate, compressing on the fly with multi-threaded zstd.
 /// Memory usage is constant (buffers only current chunks), eliminating RAM spikes.
 pub fn pack_directory_stream<W: Write>(root: &Path, writer: W) -> anyhow::Result<()> {
-    let mut encoder = GzEncoder::new(writer, Compression::fast());
+    let mut encoder =
+        zstd::stream::write::Encoder::new(writer, 1).context("initializing zstd encoder")?;
+    let _ = encoder.multithread(0);
     {
         let mut tar = Builder::new(&mut encoder);
         tar.follow_symlinks(false);
@@ -126,12 +139,14 @@ pub fn pack_directory_stream<W: Write>(root: &Path, writer: W) -> anyhow::Result
         tar.finish().context("finishing tarball stream")?;
     }
 
-    let mut inner = encoder.finish().context("compressing tarball stream")?;
+    let mut inner = encoder
+        .finish()
+        .context("compressing tarball stream with zstd")?;
     inner.flush().context("flushing compressed stream")?;
     Ok(())
 }
 
-/// Pack the given `root` directory into an in-memory gzipped tarball, respecting ignore patterns.
+/// Pack the given `root` directory into an in-memory tarball, respecting ignore patterns.
 /// Retained for backward compatibility and tests.
 pub fn pack_directory(root: &Path) -> anyhow::Result<Vec<u8>> {
     let mut buffer = Vec::new();
@@ -148,15 +163,37 @@ pub fn stream_workdir(
     root: &Path,
     remote_dir: &str,
 ) -> anyhow::Result<()> {
-    let remote_cmd = format!("mkdir -p '{remote_dir}' && tar -xzf - -C '{remote_dir}'");
+    stream_workdir_full(ip, port, key_path, proxy_command, None, root, remote_dir)
+}
 
-    let mut child = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
-        .arg(&remote_cmd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("spawning SSH to stream workspace")?;
+/// Stream workspace directly to remote VM via SSH stdin with optional ControlMaster socket.
+pub fn stream_workdir_full(
+    ip: &str,
+    port: u16,
+    key_path: &Path,
+    proxy_command: Option<&str>,
+    control_socket: Option<&Path>,
+    root: &Path,
+    remote_dir: &str,
+) -> anyhow::Result<()> {
+    let remote_cmd = format!(
+        "mkdir -p '{remote_dir}' && (command -v zstd >/dev/null 2>&1 && zstd -dc || tar -xzf -) | tar -xf - -C '{remote_dir}'"
+    );
+
+    let mut child = crate::connect::build_ssh_command_full(
+        ip,
+        port,
+        key_path,
+        proxy_command,
+        None,
+        control_socket,
+    )
+    .arg(&remote_cmd)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::inherit())
+    .stderr(Stdio::inherit())
+    .spawn()
+    .context("spawning SSH to stream workspace")?;
 
     let stdin = child
         .stdin
@@ -283,35 +320,78 @@ pub fn download_output(
     target_spec: &str,
     local_out: &Path,
 ) -> anyhow::Result<bool> {
+    download_output_full(
+        ip,
+        port,
+        key_path,
+        proxy_command,
+        None,
+        remote_dir,
+        target_spec,
+        local_out,
+    )
+}
+
+/// Download the recipe's output artifacts with optional ControlMaster socket and atomic staging.
+#[allow(clippy::too_many_arguments)]
+pub fn download_output_full(
+    ip: &str,
+    port: u16,
+    key_path: &Path,
+    proxy_command: Option<&str>,
+    control_socket: Option<&Path>,
+    remote_dir: &str,
+    target_spec: &str,
+    local_out: &Path,
+) -> anyhow::Result<bool> {
     let check_cmd = build_remote_artifact_check_cmd(remote_dir, target_spec);
-    let check_status = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
-        .arg(&check_cmd)
-        .status()
-        .context("checking remote output artifacts")?;
+    let check_status = crate::connect::build_ssh_command_full(
+        ip,
+        port,
+        key_path,
+        proxy_command,
+        None,
+        control_socket,
+    )
+    .arg(&check_cmd)
+    .status()
+    .context("checking remote output artifacts")?;
 
     if !check_status.success() {
         return Ok(false);
     }
 
     let remote_stream_cmd = build_remote_artifact_stream_cmd(remote_dir, target_spec);
-    let mut child = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
-        .arg(&remote_stream_cmd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("spawning SSH to download output artifacts")?;
+    let mut child = crate::connect::build_ssh_command_full(
+        ip,
+        port,
+        key_path,
+        proxy_command,
+        None,
+        control_socket,
+    )
+    .arg(&remote_stream_cmd)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit())
+    .spawn()
+    .context("spawning SSH to download output artifacts")?;
 
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("failed to capture SSH stdout"))?;
 
-    fs::create_dir_all(local_out).context("creating local output directory")?;
-    let decoder = GzDecoder::new(stdout);
-    let mut archive = Archive::new(decoder);
+    // Atomic unpack into a temporary directory
+    let temp_dir = tempfile::Builder::new()
+        .prefix("qecs-dl-")
+        .tempdir()
+        .context("creating temporary artifact unpack directory")?;
+
+    let decompressor = decompress_stream(stdout)?;
+    let mut archive = Archive::new(decompressor);
     archive
-        .unpack(local_out)
-        .context("extracting output tarball locally")?;
+        .unpack(temp_dir.path())
+        .context("extracting output tarball")?;
 
     let status = child
         .wait()
@@ -320,7 +400,42 @@ pub fn download_output(
         anyhow::bail!("SSH output download failed with exit status: {status}");
     }
 
+    // Atomic commit to local_out
+    fs::create_dir_all(local_out).context("creating local output directory")?;
+    for entry in fs::read_dir(temp_dir.path())? {
+        let entry = entry?;
+        let dest = local_out.join(entry.file_name());
+        if dest.exists() {
+            if dest.is_dir() {
+                let _ = fs::remove_dir_all(&dest);
+            } else {
+                let _ = fs::remove_file(&dest);
+            }
+        }
+        if fs::rename(entry.path(), &dest).is_err() {
+            if entry.path().is_dir() {
+                copy_recursive(&entry.path(), &dest)?;
+            } else {
+                fs::copy(entry.path(), &dest)?;
+            }
+        }
+    }
+
     Ok(true)
+}
+
+fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_recursive(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -354,7 +469,7 @@ mod tests {
         assert!(!archive_bytes.is_empty());
 
         // Decode and verify contents
-        let decoder = GzDecoder::new(&archive_bytes[..]);
+        let decoder = decompress_stream(&archive_bytes[..]).unwrap();
         let mut archive = Archive::new(decoder);
         let entries: Vec<PathBuf> = archive
             .entries()
@@ -387,7 +502,7 @@ mod tests {
         symlink(&secret, root.join("link-to-secret")).unwrap();
 
         let bytes = pack_directory(root).unwrap();
-        let decoder = GzDecoder::new(&bytes[..]);
+        let decoder = decompress_stream(&bytes[..]).unwrap();
         let mut archive = Archive::new(decoder);
         let names: Vec<String> = archive
             .entries()
@@ -413,7 +528,7 @@ mod tests {
         fs::write(root.join(".qecsignore"), "*.csv\n").unwrap();
 
         let bytes = pack_directory(root).unwrap();
-        let decoder = GzDecoder::new(&bytes[..]);
+        let decoder = decompress_stream(&bytes[..]).unwrap();
         let mut archive = Archive::new(decoder);
         let entries: Vec<PathBuf> = archive
             .entries()

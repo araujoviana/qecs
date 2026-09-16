@@ -226,6 +226,7 @@ pub async fn execute_tool(ctx: &Ctx, name: &str, args: &serde_json::Value) -> Ca
             let logs_args = crate::cli::LogsArgs {
                 target,
                 follow: false,
+                cloud_init: false,
             };
             match crate::commands::logs::cmd_logs(ctx, logs_args).await {
                 Ok(()) => CallToolResult::ok("Logs retrieved successfully."),

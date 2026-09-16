@@ -260,6 +260,14 @@ write_files:
           fi
       fi
 
+      # 4b. Check CPU activity (1-minute load average >= 0.50)
+      LOAD_1M=$(awk '{{print $1}}' /proc/loadavg 2>/dev/null || echo 0)
+      if awk -v load="$LOAD_1M" 'BEGIN {{ exit !(load >= 0.5) }}' 2>/dev/null; then
+          rm -f "$IDLE_STATE_FILE"
+          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-guard] CPU load active (${{LOAD_1M}} >= 0.5). Machine in use." >> "$LOG_FILE"
+          exit 0
+      fi
+
       # 5. Machine is idle: track duration
       CURRENT_IDLE=0
       if [ -f "$IDLE_STATE_FILE" ]; then
@@ -286,6 +294,7 @@ write_files:
       [Service]
       Type=oneshot
       ExecStart=/usr/local/bin/qecs-guard.sh
+      OOMScoreAdjust=-1000
 
   - path: /etc/systemd/system/qecs-guard.timer
     permissions: "0644"
@@ -305,7 +314,8 @@ runcmd:
   - [systemctl, restart, ssh]
   - [bash, /usr/local/bin/qecs-dns-resilience.sh]
   - [mkdir, -p, /run/qecs]
-  - [chmod, "1777", /run/qecs]
+  - [chown, "ubuntu:ubuntu", /run/qecs]
+  - [chmod, "0775", /run/qecs]
   - [systemctl, daemon-reload]
   - [systemctl, enable, --now, qecs-guard.timer]
 {gpu_runcmd}{relay_runcmd}  - shutdown -h +{ttl_minutes} "qecs hard TTL guard"

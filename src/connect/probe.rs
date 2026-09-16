@@ -34,20 +34,34 @@ pub async fn resolve_connection_port_with_relay(
 ) -> anyhow::Result<u16> {
     let probe_timeout = Duration::from_secs(3);
 
-    // 1. Try cached port first if known (a cached relay port is 22, so this is safe)
+    // 1. Try cached port first if known and neither standard 22 nor 443
     if let Some(port) = cached_port
+        && port != 22
+        && port != 443
         && probe_ssh_port(ip, port, probe_timeout).await
     {
         return Ok(port);
     }
 
-    // 2. Try default port 22
-    if probe_ssh_port(ip, 22, probe_timeout).await {
-        return Ok(22);
+    // 2. Concurrently probe ports 22 and 443 (Happy Eyeballs pattern)
+    let (p22, p443) = tokio::join!(
+        probe_ssh_port(ip, 22, probe_timeout),
+        probe_ssh_port(ip, 443, probe_timeout)
+    );
+
+    if let Some(port) = cached_port {
+        if port == 443 && p443 {
+            return Ok(443);
+        }
+        if port == 22 && p22 {
+            return Ok(22);
+        }
     }
 
-    // 3. Try alternative port 443 (configured in cloud-init)
-    if probe_ssh_port(ip, 443, probe_timeout).await {
+    if p22 {
+        return Ok(22);
+    }
+    if p443 {
         return Ok(443);
     }
 

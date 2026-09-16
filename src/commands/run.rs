@@ -92,14 +92,25 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
 
     let proxy_cmd = relay.proxy_command(&ip, port);
 
-    // 8. Stream workspace directly to VM (constant memory)
+    // Instantiate persistent ControlMaster session early so all subsequent commands
+    // (workspace streaming, env staging, GPU probing, execution) share a single multiplexed channel.
+    let control_session = crate::run::tunnel::ControlMasterSession::new(
+        &vm.name,
+        &ip,
+        port,
+        &paths.private_key,
+        proxy_cmd.as_deref(),
+    );
+
+    // 8. Stream workspace directly to VM (constant memory, multi-threaded zstd)
     let pb = crate::ui::spinner("Streaming workspace to VM...");
     ctx.telemetry.phase_sync("workdir-stream", || {
-        sync::stream_workdir(
+        sync::stream_workdir_full(
             &ip,
             port,
             &paths.private_key,
             proxy_cmd.as_deref(),
+            Some(&control_session.socket_path),
             &recipe.workdir,
             "/home/ubuntu/workspace",
         )
@@ -109,11 +120,12 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
 
     // 9. Stage environment variables if present
     if !env_vars.is_empty() {
-        execute::stage_env_vars(
+        execute::stage_env_vars_full(
             &ip,
             port,
             &paths.private_key,
             proxy_cmd.as_deref(),
+            Some(&control_session.socket_path),
             &env_vars,
         )?;
     }
@@ -126,11 +138,12 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         ctx.telemetry
             .phase_try(
                 "gpu-wait",
-                wait_for_gpu_ready(
+                wait_for_gpu_ready_full(
                     &ip,
                     port,
                     &paths.private_key,
                     proxy_cmd.as_deref(),
+                    Some(&control_session.socket_path),
                     Duration::from_secs(900),
                 ),
             )
@@ -163,7 +176,8 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         if let Ok(project) = project_id_res {
             let bucket = crate::hwc::obs::cache_bucket_name(&region, &project.id);
             let _ = crate::hwc::obs::ensure_cache_bucket(&client, &region, &bucket).await;
-            let object_key = format!("caches/{key}.tar.gz");
+            let arch = std::env::consts::ARCH;
+            let object_key = format!("caches/v1/{arch}-linux/{key}.tar.gz");
 
             let get_url = crate::hwc::obs::generate_presigned_url(
                 client.creds(),
@@ -201,17 +215,19 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         let cache_upload_cmd = cache_put_url.as_ref().map(|put_url| {
             format!(
                 "if [ -d /home/ubuntu/.cache ] || [ -d /home/ubuntu/.cargo ]; then \
-                    tar -czf - -C /home/ubuntu $([ -d /home/ubuntu/.cache ] && echo .cache) $([ -d /home/ubuntu/.cargo ] && echo .cargo) 2>/dev/null | curl -sf -X PUT --upload-file - \"{put_url}\" || true; \
+                    tar -czf /tmp/qecs-cache.tar.gz -C /home/ubuntu $([ -d /home/ubuntu/.cache ] && echo .cache) $([ -d /home/ubuntu/.cargo ] && echo .cargo) 2>/dev/null && \
+                    curl -sf -T /tmp/qecs-cache.tar.gz \"{put_url}\" && rm -f /tmp/qecs-cache.tar.gz || true; \
                 fi"
             )
         });
 
         ctx.telemetry.phase_sync("job-exec", || {
-            execute::execute_job_detached(
+            execute::execute_job_detached_full(
                 &ip,
                 port,
                 &paths.private_key,
                 proxy_cmd.as_deref(),
+                Some(&control_session.socket_path),
                 "/home/ubuntu/workspace",
                 &effective_setup_cmds,
                 &effective_run_cmd,
@@ -254,14 +270,6 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         None
     };
 
-    let control_session = crate::run::tunnel::ControlMasterSession::new(
-        &vm.name,
-        &ip,
-        port,
-        &paths.private_key,
-        proxy_cmd.as_deref(),
-    );
-
     let watcher_stop = crate::run::tunnel::spawn_port_watcher(control_session.clone());
 
     let exit_code = ctx.telemetry.phase_sync("job-exec", || {
@@ -288,14 +296,16 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         let pb = crate::ui::spinner("Saving dependency cache to OBS...");
         let cache_upload_cmd = format!(
             "if [ -d /home/ubuntu/.cache ] || [ -d /home/ubuntu/.cargo ]; then \
-                    tar -czf - -C /home/ubuntu $([ -d /home/ubuntu/.cache ] && echo .cache) $([ -d /home/ubuntu/.cargo ] && echo .cargo) 2>/dev/null | curl -sf -X PUT --upload-file - \"{put_url}\" || true; \
-                fi"
+                tar -czf /tmp/qecs-cache.tar.gz -C /home/ubuntu $([ -d /home/ubuntu/.cache ] && echo .cache) $([ -d /home/ubuntu/.cargo ] && echo .cargo) 2>/dev/null && \
+                curl -sf -T /tmp/qecs-cache.tar.gz \"{put_url}\" && rm -f /tmp/qecs-cache.tar.gz || true; \
+            fi"
         );
-        let _ = execute::run_remote_command(
+        let _ = execute::run_remote_command_full(
             &ip,
             port,
             &paths.private_key,
             proxy_cmd.as_deref(),
+            Some(&control_session.socket_path),
             &cache_upload_cmd,
         );
         pb.finish_and_clear();
@@ -536,13 +546,31 @@ pub async fn wait_for_gpu_ready(
     proxy_command: Option<&str>,
     timeout: Duration,
 ) -> anyhow::Result<()> {
+    wait_for_gpu_ready_full(ip, port, key_path, proxy_command, None, timeout).await
+}
+
+pub async fn wait_for_gpu_ready_full(
+    ip: &str,
+    port: u16,
+    key_path: &Path,
+    proxy_command: Option<&str>,
+    control_socket: Option<&Path>,
+    timeout: Duration,
+) -> anyhow::Result<()> {
     let start = Instant::now();
     let poll_cmd = "[ -f /run/qecs/gpu.status ] && cat /run/qecs/gpu.status";
 
     while start.elapsed() < timeout {
-        let output = connect::build_ssh_command(ip, port, key_path, proxy_command)
-            .arg(poll_cmd)
-            .output();
+        let output = connect::build_ssh_command_full(
+            ip,
+            port,
+            key_path,
+            proxy_command,
+            None,
+            control_socket,
+        )
+        .arg(poll_cmd)
+        .output();
 
         if let Ok(out) = output
             && out.status.success()
@@ -552,9 +580,16 @@ pub async fn wait_for_gpu_ready(
                 return Ok(());
             } else if status == "FAILED" {
                 let log_cmd = "tail -n 25 /var/log/qecs-gpu-setup.log 2>/dev/null || true";
-                let log_output = connect::build_ssh_command(ip, port, key_path, proxy_command)
-                    .arg(log_cmd)
-                    .output();
+                let log_output = connect::build_ssh_command_full(
+                    ip,
+                    port,
+                    key_path,
+                    proxy_command,
+                    None,
+                    control_socket,
+                )
+                .arg(log_cmd)
+                .output();
                 let details = if let Ok(l) = log_output {
                     String::from_utf8_lossy(&l.stdout).trim().to_string()
                 } else {

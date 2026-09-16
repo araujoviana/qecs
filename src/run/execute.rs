@@ -191,7 +191,7 @@ pub fn build_detached_launcher(
 
     let script = format!(
         "mkdir -p /run/qecs && touch /run/qecs/job.lock\n\
-         trap 'rm -f /run/qecs/job.lock' EXIT\n\
+         trap 'TRAP_RET=$?; [ -f /home/ubuntu/job.exit ] || echo $TRAP_RET > /home/ubuntu/job.exit; rm -f /run/qecs/job.lock' EXIT\n\
          exec 2> >(tee -a /run/qecs/job.stderr >&2)\n\
          set -a; [ -f /run/qecs/job.env ] && source /run/qecs/job.env; set +a\n\
          cd '{remote_dir}' || exit 1\n\
@@ -214,12 +214,42 @@ pub fn build_detached_launcher(
 
 /// Execute a job in detached mode. The remote job runs under nohup and logs to
 /// `/home/ubuntu/job.log`, writing its exit code to `/home/ubuntu/job.exit` on completion.
-#[allow(clippy::too_many_arguments)] // SSH target + job spec; a RemoteTarget bundle is a later cleanup
+#[allow(clippy::too_many_arguments)]
 pub fn execute_job_detached(
     ip: &str,
     port: u16,
     key_path: &Path,
     proxy_command: Option<&str>,
+    remote_dir: &str,
+    setup_cmds: &[String],
+    run_cmd: &str,
+    trailing_args: &[String],
+    output_subdir: &str,
+    post_success_cmd: Option<&str>,
+) -> anyhow::Result<()> {
+    execute_job_detached_full(
+        ip,
+        port,
+        key_path,
+        proxy_command,
+        None,
+        remote_dir,
+        setup_cmds,
+        run_cmd,
+        trailing_args,
+        output_subdir,
+        post_success_cmd,
+    )
+}
+
+/// Execute a job in detached mode with optional ControlMaster socket.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_job_detached_full(
+    ip: &str,
+    port: u16,
+    key_path: &Path,
+    proxy_command: Option<&str>,
+    control_socket: Option<&Path>,
     remote_dir: &str,
     setup_cmds: &[String],
     run_cmd: &str,
@@ -236,10 +266,17 @@ pub fn execute_job_detached(
         post_success_cmd,
     );
 
-    let status = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
-        .arg(&setup_runner_cmd)
-        .status()
-        .context("spawning detached remote job over SSH")?;
+    let status = crate::connect::build_ssh_command_full(
+        ip,
+        port,
+        key_path,
+        proxy_command,
+        None,
+        control_socket,
+    )
+    .arg(&setup_runner_cmd)
+    .status()
+    .context("spawning detached remote job over SSH")?;
 
     if !status.success() {
         anyhow::bail!("failed to launch detached job over SSH: exit status {status}");
@@ -256,7 +293,19 @@ pub fn run_remote_command(
     proxy_command: Option<&str>,
     command: &str,
 ) -> anyhow::Result<std::process::ExitStatus> {
-    crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
+    run_remote_command_full(ip, port, key_path, proxy_command, None, command)
+}
+
+/// Execute a raw command over SSH non-interactively with optional ControlMaster socket.
+pub fn run_remote_command_full(
+    ip: &str,
+    port: u16,
+    key_path: &Path,
+    proxy_command: Option<&str>,
+    control_socket: Option<&Path>,
+    command: &str,
+) -> anyhow::Result<std::process::ExitStatus> {
+    crate::connect::build_ssh_command_full(ip, port, key_path, proxy_command, None, control_socket)
         .arg(command)
         .status()
         .context("running remote command over SSH")
@@ -268,6 +317,18 @@ pub fn stage_env_vars(
     port: u16,
     key_path: &Path,
     proxy_command: Option<&str>,
+    env_vars: &[(String, String)],
+) -> anyhow::Result<()> {
+    stage_env_vars_full(ip, port, key_path, proxy_command, None, env_vars)
+}
+
+/// Stage environment variables with optional ControlMaster socket.
+pub fn stage_env_vars_full(
+    ip: &str,
+    port: u16,
+    key_path: &Path,
+    proxy_command: Option<&str>,
+    control_socket: Option<&Path>,
     env_vars: &[(String, String)],
 ) -> anyhow::Result<()> {
     if env_vars.is_empty() {
@@ -283,10 +344,17 @@ pub fn stage_env_vars(
         "mkdir -p /run/qecs && cat << 'EOF' > /run/qecs/job.env\n{env_content}EOF\nchmod 0600 /run/qecs/job.env"
     );
 
-    let status = crate::connect::build_ssh_command(ip, port, key_path, proxy_command)
-        .arg(&cmd)
-        .status()
-        .context("staging environment variables over SSH")?;
+    let status = crate::connect::build_ssh_command_full(
+        ip,
+        port,
+        key_path,
+        proxy_command,
+        None,
+        control_socket,
+    )
+    .arg(&cmd)
+    .status()
+    .context("staging environment variables over SSH")?;
 
     if !status.success() {
         anyhow::bail!("failed to stage environment variables: exit status {status}");

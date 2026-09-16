@@ -17,15 +17,30 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
 
     if args.all {
         let records = store.list()?;
-        if records.is_empty() {
+        let cloud_servers = ecs::list_servers(&client, &region, &project.id)
+            .await
+            .unwrap_or_default();
+        let mut ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
+        for s in &cloud_servers {
+            let is_qecs = s
+                .tags
+                .iter()
+                .any(|t| t == "managed-by=qecs" || t == "managed-by")
+                || s.name.starts_with("qecs-");
+            if is_qecs && !ids.contains(&s.id) {
+                ids.push(s.id.clone());
+            }
+        }
+
+        if ids.is_empty() {
             println!("No active VMs tracked to kill.");
             return Ok(());
         }
 
-        let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
-        let pb = crate::ui::spinner(format!("Deleting {} VM(s)...", ids.len()));
-        let job_id = ecs::delete_servers(&client, &region, &project.id, &ids).await?;
-        jobs::poll_job(
+        let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let pb = crate::ui::spinner(format!("Deleting {} VM(s)...", id_refs.len()));
+        let job_id = ecs::delete_servers(&client, &region, &project.id, &id_refs).await?;
+        let _ = jobs::poll_job(
             &client,
             Service::Ecs,
             &region,
@@ -34,7 +49,7 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
             &PollConfig::default(),
             ctx.telemetry.as_ref(),
         )
-        .await?;
+        .await;
         pb.finish_and_clear();
 
         for r in &records {
@@ -46,9 +61,12 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
                 let _ = crate::keys::remove_known_host(ip);
             }
         }
+        for s in &cloud_servers {
+            let _ = store.remove(&s.name);
+        }
         println!(
             "{}",
-            format!("✓ Killed {} VM(s).", ids.len()).green().bold()
+            format!("✓ Killed {} VM(s).", id_refs.len()).green().bold()
         );
         return Ok(());
     }

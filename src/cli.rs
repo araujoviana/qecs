@@ -174,6 +174,8 @@ pub struct LogsArgs {
     pub target: String,
     #[arg(short, long)]
     pub follow: bool,
+    #[arg(long, help = "View cloud-init bootstrap logs instead of the job log")]
+    pub cloud_init: bool,
 }
 
 #[derive(Args, Debug, Clone)]

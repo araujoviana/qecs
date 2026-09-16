@@ -49,13 +49,20 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
     // on-box guard never idle-powers-off in the gap between the job's own lock
     // trap firing and this command pulling the artifacts.
     let poll_cmd = "mkdir -p /run/qecs && touch /run/qecs/job.lock; \
-                    [ -f /home/ubuntu/job.exit ] && cat /home/ubuntu/job.exit";
+                    if [ -f /home/ubuntu/job.exit ]; then \
+                        cat /home/ubuntu/job.exit; \
+                    elif pgrep -f 'run-job.sh' >/dev/null 2>&1; then \
+                        echo 'RUNNING'; \
+                    else \
+                        echo 'DEAD'; \
+                    fi";
     let start = Instant::now();
     let timeout = Duration::from_secs(crate::lifecycle::wait_deadline_secs(
         &vm.created_at,
         vm.ttl_secs,
     ));
     let mut interval = Duration::from_secs(3);
+    let mut dead_checks = 0;
 
     let exit_code = loop {
         let output =
@@ -70,6 +77,24 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
             let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if let Ok(code) = text.parse::<i32>() {
                 break code;
+            } else if text == "DEAD" {
+                dead_checks += 1;
+                // Require 2 consecutive checks to avoid any race condition at startup
+                if dead_checks >= 2 {
+                    pb.finish_and_clear();
+                    eprintln!(
+                        "{}",
+                        format!(
+                            "Warning: Job process on `{}` terminated unexpectedly without writing exit code (possible OOM killer SIGKILL or kernel crash). Check `qecs logs {}`.",
+                            vm.name, vm.name
+                        )
+                        .yellow()
+                        .bold()
+                    );
+                    break 137;
+                }
+            } else {
+                dead_checks = 0;
             }
         }
 

@@ -28,6 +28,8 @@ pub struct Subnet {
     pub vpc_id: String,
     #[serde(default)]
     pub status: String,
+    #[serde(default)]
+    pub availability_zone: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,7 +189,18 @@ async fn get_subnet(
     Ok(resp.subnet)
 }
 
-/// Reuse the subnet named `name` in `vpc_id`, or create it and wait for `ACTIVE`.
+/// Generate non-overlapping CIDR and gateway IP for an availability zone within 192.168.0.0/16.
+pub fn az_subnet_cidr_and_gateway(az: &str) -> (String, String) {
+    let suffix = az.chars().last().unwrap_or('a');
+    let idx = if suffix.is_ascii_lowercase() {
+        (suffix as u8 - b'a') as usize
+    } else {
+        0
+    };
+    (format!("192.168.{idx}.0/24"), format!("192.168.{idx}.1"))
+}
+
+/// Reuse the subnet named `name` in `vpc_id` (or matching AZ), or create it and wait for `ACTIVE`.
 #[allow(clippy::too_many_arguments)]
 pub async fn ensure_subnet(
     c: &SignedClient,
@@ -199,7 +212,14 @@ pub async fn ensure_subnet(
     gateway_ip: &str,
     az: &str,
 ) -> anyhow::Result<Subnet> {
-    if let Some(existing) = pick_by_name(list_subnets(c, region, project_id, vpc_id).await?, name) {
+    let subnets = list_subnets(c, region, project_id, vpc_id).await?;
+    if let Some(existing) = pick_by_name(subnets.clone(), name) {
+        return Ok(existing);
+    }
+    // Backward compatibility: if "qecs" exists and belongs to target AZ, reuse it
+    if let Some(existing) = pick_by_name(subnets, "qecs")
+        && existing.availability_zone.as_deref().unwrap_or(az) == az
+    {
         return Ok(existing);
     }
     let url = format!("{}/subnets", vpc_base(region, project_id));
@@ -280,6 +300,7 @@ mod tests {
             cidr: "192.168.0.0/24".into(),
             vpc_id: "vpc-1".into(),
             status: status.into(),
+            availability_zone: None,
         }
     }
 
@@ -316,5 +337,20 @@ mod tests {
             subnet_ready(&subnet("qecs", "UNKNOWN")).unwrap(),
             Poll::Pending
         ));
+    }
+
+    #[test]
+    fn test_az_subnet_cidr_and_gateway() {
+        let (cidr_a, gw_a) = az_subnet_cidr_and_gateway("ap-southeast-3a");
+        assert_eq!(cidr_a, "192.168.0.0/24");
+        assert_eq!(gw_a, "192.168.0.1");
+
+        let (cidr_b, gw_b) = az_subnet_cidr_and_gateway("ap-southeast-3b");
+        assert_eq!(cidr_b, "192.168.1.0/24");
+        assert_eq!(gw_b, "192.168.1.1");
+
+        let (cidr_c, gw_c) = az_subnet_cidr_and_gateway("sa-brazil-1c");
+        assert_eq!(cidr_c, "192.168.2.0/24");
+        assert_eq!(gw_c, "192.168.2.1");
     }
 }

@@ -23,10 +23,16 @@ pub async fn cmd_logs(ctx: &Ctx, args: LogsArgs) -> anyhow::Result<()> {
         let _ = store.upsert(vm);
     }
 
-    let remote_cmd = if args.follow {
-        "tail -n +1 -f /var/log/cloud-init-output.log"
+    let remote_cmd = if args.cloud_init {
+        if args.follow {
+            "tail -n +1 -f /var/log/cloud-init-output.log"
+        } else {
+            "cat /var/log/cloud-init-output.log"
+        }
+    } else if args.follow {
+        "if [ -f /home/ubuntu/job.log ]; then tail -n +1 -f /home/ubuntu/job.log; else tail -n +1 -f /var/log/cloud-init-output.log; fi"
     } else {
-        "cat /var/log/cloud-init-output.log"
+        "if [ -f /home/ubuntu/job.log ]; then cat /home/ubuntu/job.log; else cat /var/log/cloud-init-output.log; fi"
     };
 
     let proxy_cmd = relay.proxy_command(&ip, port);

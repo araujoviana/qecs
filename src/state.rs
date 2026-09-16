@@ -1,5 +1,7 @@
 //! `~/.local/state/qecs/vms.json` - a cache of provisioned VMs. Cloud is truth.
 use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -26,12 +28,15 @@ pub struct StateStore {
     pub path: PathBuf,
 }
 
-struct Lock {
-    path: PathBuf,
+pub struct Lock {
+    file: File,
 }
+
 impl Drop for Lock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 
@@ -44,28 +49,41 @@ impl StateStore {
         Ok(StateStore { path: state_path() })
     }
 
-    fn acquire_lock(&self) -> anyhow::Result<Lock> {
+    pub fn acquire_lock_with_timeout(&self, timeout: Duration) -> anyhow::Result<Lock> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let lock_path = self.path.with_extension("json.lock");
+        let lock_path = self.path.with_file_name("vms.lock");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+
+        let fd = file.as_raw_fd();
         let start = Instant::now();
         loop {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
+            let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 {
+                return Ok(Lock { file });
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EWOULDBLOCK)
+                || err.raw_os_error() == Some(libc::EAGAIN)
             {
-                Ok(_) => return Ok(Lock { path: lock_path }),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if start.elapsed() > Duration::from_secs(5) {
-                        anyhow::bail!("state file is locked: {}", lock_path.display());
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
+                if start.elapsed() > timeout {
+                    anyhow::bail!("state file is locked: {}", lock_path.display());
                 }
-                Err(e) => return Err(e.into()),
+                std::thread::sleep(Duration::from_millis(25));
+            } else {
+                return Err(err.into());
             }
         }
+    }
+
+    pub fn acquire_lock(&self) -> anyhow::Result<Lock> {
+        self.acquire_lock_with_timeout(Duration::from_secs(5))
     }
 
     pub fn list(&self) -> anyhow::Result<Vec<VmRecord>> {
@@ -83,7 +101,13 @@ impl StateStore {
     }
 
     fn write_all(&self, recs: &[VmRecord]) -> anyhow::Result<()> {
-        let tmp = self.path.with_extension("json.tmp");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp =
+            self.path
+                .with_file_name(format!("vms.json.tmp.{}.{}", std::process::id(), nanos));
         std::fs::write(&tmp, serde_json::to_vec_pretty(recs)?)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
@@ -175,6 +199,47 @@ mod tests {
         let s = StateStore::at(dir.path().join("vms.json"));
         s.upsert(rec("a")).unwrap();
         s.upsert(rec("b")).unwrap();
-        assert!(!dir.path().join("vms.json.lock").exists());
+        // Verifying lock can be acquired immediately because write released it
+        let lock = s.acquire_lock_with_timeout(Duration::from_millis(100));
+        assert!(lock.is_ok());
+    }
+
+    #[test]
+    fn automatic_unlock_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = StateStore::at(dir.path().join("vms.json"));
+        {
+            let lock1 = s
+                .acquire_lock_with_timeout(Duration::from_millis(100))
+                .unwrap();
+            // A second attempt with zero timeout fails
+            let lock2 = s.acquire_lock_with_timeout(Duration::from_millis(50));
+            assert!(lock2.is_err());
+            drop(lock1);
+        }
+        // After drop, lock is available
+        let lock3 = s.acquire_lock_with_timeout(Duration::from_millis(100));
+        assert!(lock3.is_ok());
+    }
+
+    #[test]
+    fn concurrent_upserts_succeed() {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let s = Arc::new(StateStore::at(dir.path().join("vms.json")));
+        let mut handles = Vec::new();
+
+        for i in 0..10 {
+            let store = Arc::clone(&s);
+            handles.push(std::thread::spawn(move || {
+                store.upsert(rec(&format!("node-{i}"))).unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(s.list().unwrap().len(), 10);
     }
 }
