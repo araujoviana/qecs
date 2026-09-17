@@ -61,6 +61,40 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         .await?
         .ok_or_else(|| anyhow::anyhow!("provisioning did not return a VM record"))?;
 
+    let mut lease = crate::lease::VmLease::new(ctx.clone(), vm);
+
+    let run_res = tokio::select! {
+        res = execute_run_pipeline(ctx, &mut lease, &args, &recipe, &effective_run_cmd, &env_vars, final_preset, &paths) => res,
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("\n{}", format!("Interrupt received. Tearing down VM `{}`...", lease.record().name).yellow().bold());
+            let _ = lease.teardown().await;
+            anyhow::bail!("run cancelled by user");
+        }
+    };
+
+    match run_res {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if !lease.is_disarmed() && !lease.is_destroyed() {
+                let _ = lease.teardown().await;
+            }
+            Err(e)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_run_pipeline(
+    ctx: &Ctx,
+    lease: &mut crate::lease::VmLease,
+    args: &RunArgs,
+    recipe: &RunRecipe,
+    effective_run_cmd: &str,
+    env_vars: &[(String, String)],
+    final_preset: crate::presets::Preset,
+    paths: &keys::KeyPairPaths,
+) -> anyhow::Result<()> {
+    let vm = lease.record();
     let ip = vm
         .eip
         .clone()
@@ -86,16 +120,17 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
 
     // Cache port in state store
     let store = StateStore::open()?;
-    let mut updated_vm = vm.clone();
+    let mut updated_vm = lease.record().clone();
     updated_vm.connect_port = Some(port);
     let _ = store.upsert(updated_vm.clone());
+    lease.record_mut().connect_port = Some(port);
 
     let proxy_cmd = relay.proxy_command(&ip, port);
 
     // Instantiate persistent ControlMaster session early so all subsequent commands
     // (workspace streaming, env staging, GPU probing, execution) share a single multiplexed channel.
     let control_session = crate::run::tunnel::ControlMasterSession::new(
-        &vm.name,
+        &lease.record().name,
         &ip,
         port,
         &paths.private_key,
@@ -126,7 +161,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
             &paths.private_key,
             proxy_cmd.as_deref(),
             Some(&control_session.socket_path),
-            &env_vars,
+            env_vars,
         )?;
     }
 
@@ -230,24 +265,25 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
                 Some(&control_session.socket_path),
                 "/home/ubuntu/workspace",
                 &effective_setup_cmds,
-                &effective_run_cmd,
+                effective_run_cmd,
                 &args.args,
                 artifact_spec,
                 cache_upload_cmd.as_deref(),
             )
         })?;
 
-        updated_vm.job = Some(vm.name.clone());
+        updated_vm.job = Some(lease.record().name.clone());
         let _ = store.upsert(updated_vm);
+        lease.disarm();
 
         println!(
             "{}",
-            format!("✓ Job launched in background on `{}`.", vm.name)
+            format!("✓ Job launched in background on `{}`.", lease.record().name)
                 .green()
                 .bold()
         );
-        println!("  Stream logs:  qecs logs {} --follow", vm.name);
-        println!("  Await result: qecs wait {}", vm.name);
+        println!("  Stream logs:  qecs logs {} --follow", lease.record().name);
+        println!("  Await result: qecs wait {}", lease.record().name);
         return Ok(());
     }
 
@@ -256,7 +292,9 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         "{}",
         format!(
             "▶ Running `{}` ({}) on `{}`...",
-            effective_run_cmd, recipe.name, vm.name
+            effective_run_cmd,
+            recipe.name,
+            lease.record().name
         )
         .cyan()
         .bold()
@@ -280,7 +318,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
             proxy_cmd.as_deref(),
             "/home/ubuntu/workspace",
             &effective_setup_cmds,
-            &effective_run_cmd,
+            effective_run_cmd,
             &args.args,
             pty_opt,
             Some(&control_session.socket_path),
@@ -324,7 +362,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
             args.flavor
                 .as_deref()
                 .unwrap_or_else(|| final_preset.as_str()),
-            &vm.name,
+            &lease.record().name,
         )
     } else {
         None
@@ -333,6 +371,7 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     // 13. Pull output artifacts
     let local_output_dir = args
         .output
+        .clone()
         .unwrap_or_else(|| recipe.workdir.join(&recipe.output_dir));
 
     let pb = crate::ui::spinner("Checking for output artifacts...");
@@ -370,17 +409,24 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     // 14. Auto-destruction decision
     let should_keep = args.keep || (args.keep_on_failure && exit_code != 0);
     if should_keep {
-        println!("{}", format!("Note: VM `{}` kept alive.", vm.name).dimmed());
+        lease.disarm();
+        println!(
+            "{}",
+            format!("Note: VM `{}` kept alive.", lease.record().name).dimmed()
+        );
         if exit_code != 0 {
-            println!("  Debug with interactive shell: qecs shell {}", vm.name);
+            println!(
+                "  Debug with interactive shell: qecs shell {}",
+                lease.record().name
+            );
         }
     } else {
-        let pb = crate::ui::spinner(format!("Tearing down VM `{}`...", vm.name));
-        destroy_vm(ctx, &vm.id, &vm.name).await?;
+        let pb = crate::ui::spinner(format!("Tearing down VM `{}`...", lease.record().name));
+        lease.teardown().await?;
         pb.finish_and_clear();
         println!(
             "{}",
-            format!("✓ Destroyed ephemeral VM `{}`.", vm.name).green()
+            format!("✓ Destroyed ephemeral VM `{}`.", lease.record().name).green()
         );
     }
 

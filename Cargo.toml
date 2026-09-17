@@ -1,6 +1,6 @@
 [package]
 name = "qecs"
-version = "0.38.1"
+version = "0.39.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -28,7 +28,7 @@ serde_json = "1"
 sha2 = "0.10"
 tabled = "0.20"
 tar = "0.4"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "fs"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "fs", "signal"] }
 toml = "0.8"
 tempfile = "3"
 zstd = { version = "0.13", features = ["zstdmt"] }

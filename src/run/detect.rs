@@ -259,19 +259,50 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
 
     // 3. Node (package.json)
     if workdir.join("package.json").is_file() {
-        let (pm, setup, run) = if workdir.join("bun.lockb").is_file() {
-            ("bun", "bun install", "bun run start")
+        let (pm, bootstrap_setup, run) = if workdir.join("bun.lockb").is_file() {
+            (
+                "bun",
+                vec![
+                    "which bun >/dev/null 2>&1 || (curl -fsSL https://bun.sh/install | bash)"
+                        .into(),
+                    "export PATH=\"$HOME/.bun/bin:$PATH\"".into(),
+                    "bun install".into(),
+                ],
+                "bun run start",
+            )
         } else if workdir.join("pnpm-lock.yaml").is_file() {
-            ("pnpm", "pnpm install", "pnpm start")
+            (
+                "pnpm",
+                vec![
+                    "which pnpm >/dev/null 2>&1 || (curl -fsSL https://get.pnpm.io/install.sh | sh -)".into(),
+                    "export PATH=\"$HOME/.local/share/pnpm:$PATH\"".into(),
+                    "pnpm install".into(),
+                ],
+                "pnpm start",
+            )
         } else if workdir.join("yarn.lock").is_file() {
-            ("yarn", "yarn install", "yarn start")
+            (
+                "yarn",
+                vec![
+                    "which yarn >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm && sudo npm install -g yarn)".into(),
+                    "yarn install".into(),
+                ],
+                "yarn start",
+            )
         } else {
-            ("npm", "npm install", "npm start")
+            (
+                "npm",
+                vec![
+                    "which npm >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm)".into(),
+                    "npm install".into(),
+                ],
+                "npm start",
+            )
         };
 
         return Ok(RunRecipe {
             name: format!("node-{pm}"),
-            setup_commands: vec![setup.into()],
+            setup_commands: bootstrap_setup,
             run_command: run.into(),
             preset: Preset::Normal,
             workdir: workdir.to_path_buf(),
@@ -283,7 +314,10 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
     if workdir.join("pom.xml").is_file() {
         return Ok(RunRecipe {
             name: "java-maven".into(),
-            setup_commands: vec!["mvn -q package -DskipTests".into()],
+            setup_commands: vec![
+                "which mvn >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq maven default-jdk)".into(),
+                "mvn -q package -DskipTests".into(),
+            ],
             run_command: "java -jar $(ls -t target/*.jar | head -n 1)".into(),
             preset: Preset::Normal,
             workdir: workdir.to_path_buf(),
@@ -294,7 +328,10 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
     if workdir.join("build.gradle").is_file() || workdir.join("build.gradle.kts").is_file() {
         return Ok(RunRecipe {
             name: "java-gradle".into(),
-            setup_commands: vec!["./gradlew build -x test".into()],
+            setup_commands: vec![
+                "which java >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq default-jdk)".into(),
+                "./gradlew build -x test".into(),
+            ],
             run_command: "java -jar $(ls -t build/libs/*.jar | head -n 1)".into(),
             preset: Preset::Normal,
             workdir: workdir.to_path_buf(),
@@ -306,7 +343,10 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
     if workdir.join("CMakeLists.txt").is_file() {
         return Ok(RunRecipe {
             name: "cmake".into(),
-            setup_commands: vec!["cmake -B build && cmake --build build".into()],
+            setup_commands: vec![
+                "which cmake >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq cmake build-essential)".into(),
+                "cmake -B build && cmake --build build".into(),
+            ],
             run_command: "./build/$(ls -t build/ | head -n 1)".into(),
             preset: Preset::Normal,
             workdir: workdir.to_path_buf(),
@@ -318,7 +358,10 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
     if workdir.join("go.mod").is_file() {
         return Ok(RunRecipe {
             name: "go".into(),
-            setup_commands: vec!["go build -o app .".into()],
+            setup_commands: vec![
+                "which go >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq golang-go)".into(),
+                "go build -o app .".into(),
+            ],
             run_command: "./app".into(),
             preset: Preset::Normal,
             workdir: workdir.to_path_buf(),
@@ -336,6 +379,10 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
                 sys_pkgs.join(" ")
             ));
         }
+        setup.push(
+            "which cargo >/dev/null 2>&1 || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal)".into(),
+        );
+        setup.push("export PATH=\"$HOME/.cargo/bin:$PATH\"".into());
         setup.push("cargo build --release".into());
         return Ok(RunRecipe {
             name: "rust-cargo".into(),
@@ -705,6 +752,12 @@ mod tests {
         let recipe = detect_recipe(dir.path()).unwrap();
         assert_eq!(recipe.name, "rust-cargo");
         assert_eq!(recipe.run_command, "cargo run --release");
+        assert!(
+            recipe
+                .setup_commands
+                .iter()
+                .any(|cmd| cmd.contains("rustup"))
+        );
     }
 
     #[test]
@@ -716,6 +769,7 @@ mod tests {
         let recipe = detect_recipe(dir.path()).unwrap();
         assert_eq!(recipe.name, "node-pnpm");
         assert_eq!(recipe.run_command, "pnpm start");
+        assert!(recipe.setup_commands.iter().any(|cmd| cmd.contains("pnpm")));
     }
 
     #[test]

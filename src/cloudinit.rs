@@ -190,6 +190,9 @@ write_files:
     content: |
       Port 22
       Port 443
+      X11Forwarding yes
+      X11DisplayOffset 10
+      X11UseLocalhost yes
 
   - path: /usr/local/bin/qecs-dns-resilience.sh
     permissions: "0755"
@@ -350,6 +353,7 @@ mod tests {
         assert!(rendered.contains(key));
         assert!(rendered.contains("Port 22"));
         assert!(rendered.contains("Port 443"));
+        assert!(rendered.contains("X11Forwarding yes"));
 
         // Guard script
         assert!(rendered.contains("/usr/local/bin/qecs-guard.sh"));

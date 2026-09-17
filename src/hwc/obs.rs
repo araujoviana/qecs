@@ -281,13 +281,16 @@ pub fn generate_presigned_url(
     let credential = format!("{}/{}", creds.ak, credential_scope);
 
     // Canonical Query Parameters
-    let mut query_params = [
+    let mut query_params = vec![
         ("X-Amz-Algorithm", "AWS4-HMAC-SHA256".to_string()),
         ("X-Amz-Credential", credential),
         ("X-Amz-Date", amz_date.clone()),
         ("X-Amz-Expires", expires_secs.to_string()),
         ("X-Amz-SignedHeaders", "host".to_string()),
     ];
+    if let Some(ref tok) = creds.security_token {
+        query_params.push(("X-Amz-Security-Token", tok.clone()));
+    }
     query_params.sort_by(|a, b| a.0.cmp(b.0));
 
     let canonical_query_str = query_params
@@ -417,5 +420,25 @@ mod tests {
         assert!(url.contains("X-Amz-Expires=900"));
         assert!(url.contains("X-Amz-SignedHeaders=host"));
         assert!(url.contains("X-Amz-Signature="));
+    }
+
+    #[test]
+    fn presigned_url_includes_security_token_when_present() {
+        let creds = Credentials {
+            ak: "TESTAK1234567890".into(),
+            sk: "TESTSK1234567890SECRETKEY".into(),
+            security_token: Some("TESTTOKEN123".into()),
+        };
+
+        let url = generate_presigned_url(
+            &creds,
+            "ap-southeast-3",
+            "qecs-cache-demo",
+            "caches/uv-123.tar.gz",
+            "GET",
+            900,
+        );
+
+        assert!(url.contains("X-Amz-Security-Token=TESTTOKEN123"));
     }
 }

@@ -340,11 +340,10 @@ pub fn stage_env_vars_full(
         env_content.push_str(&format!("{}={}\n", k, shlex_quote(v)));
     }
 
-    let cmd = format!(
-        "mkdir -p /run/qecs && cat << 'EOF' > /run/qecs/job.env\n{env_content}EOF\nchmod 0600 /run/qecs/job.env"
-    );
+    let remote_cmd =
+        "mkdir -p /run/qecs && cat > /run/qecs/job.env && chmod 0600 /run/qecs/job.env";
 
-    let status = crate::connect::build_ssh_command_full(
+    let mut child = crate::connect::build_ssh_command_full(
         ip,
         port,
         key_path,
@@ -352,9 +351,21 @@ pub fn stage_env_vars_full(
         None,
         control_socket,
     )
-    .arg(&cmd)
-    .status()
-    .context("staging environment variables over SSH")?;
+    .arg(remote_cmd)
+    .stdin(Stdio::piped())
+    .spawn()
+    .context("spawning SSH to stage environment variables")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin
+            .write_all(env_content.as_bytes())
+            .context("writing environment variables to SSH stdin")?;
+    }
+
+    let status = child
+        .wait()
+        .context("waiting for environment staging over SSH")?;
 
     if !status.success() {
         anyhow::bail!("failed to stage environment variables: exit status {status}");

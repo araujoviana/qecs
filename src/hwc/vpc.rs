@@ -52,6 +52,21 @@ pub struct SubnetResp {
     pub subnet: Subnet,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PublicIp {
+    pub id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub public_ip_address: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PublicIpsResp {
+    #[serde(default)]
+    pub publicips: Vec<PublicIp>,
+}
+
 /// `https://vpc.<region>.myhuaweicloud.com/v1/<project_id>` - the base every VPC,
 /// subnet, security-group and EIP call hangs off.
 pub(crate) fn vpc_base(region: &str, project_id: &str) -> String {
@@ -150,11 +165,16 @@ pub async fn ensure_vpc(
     }
     let url = format!("{}/vpcs", vpc_base(region, project_id));
     let body = create_vpc_body(name, cidr);
-    let resp: VpcResp = c
-        .send_json(reqwest::Method::POST, &url, Some(&body))
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-    Ok(resp.vpc)
+    let resp: Result<VpcResp, _> = c.send_json(reqwest::Method::POST, &url, Some(&body)).await;
+    match resp {
+        Ok(r) => Ok(r.vpc),
+        Err(e) => {
+            if let Some(existing) = pick_by_name(list_vpcs(c, region, project_id).await?, name) {
+                return Ok(existing);
+            }
+            Err(anyhow::anyhow!(e))
+        }
+    }
 }
 
 /// Every subnet in `vpc_id`.
@@ -224,11 +244,19 @@ pub async fn ensure_subnet(
     }
     let url = format!("{}/subnets", vpc_base(region, project_id));
     let body = create_subnet_body(name, cidr, vpc_id, gateway_ip, az);
-    let resp: SubnetResp = c
-        .send_json(reqwest::Method::POST, &url, Some(&body))
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let created = resp.subnet;
+    let post_res: Result<SubnetResp, _> =
+        c.send_json(reqwest::Method::POST, &url, Some(&body)).await;
+
+    let created = match post_res {
+        Ok(resp) => resp.subnet,
+        Err(e) => {
+            let current_subnets = list_subnets(c, region, project_id, vpc_id).await?;
+            if let Some(existing) = pick_by_name(current_subnets, name) {
+                return Ok(existing);
+            }
+            return Err(anyhow::anyhow!(e));
+        }
+    };
     let ready = poll_until(
         &PollConfig::default(),
         "subnet ACTIVE",
@@ -237,6 +265,34 @@ pub async fn ensure_subnet(
     )
     .await?;
     Ok(ready)
+}
+
+/// Every public IP in the project.
+pub async fn list_publicips(
+    c: &SignedClient,
+    region: &str,
+    project_id: &str,
+) -> anyhow::Result<Vec<PublicIp>> {
+    let url = format!("{}/publicips?limit=200", vpc_base(region, project_id));
+    let resp: PublicIpsResp = c
+        .send_json(reqwest::Method::GET, &url, None)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    Ok(resp.publicips)
+}
+
+/// Delete an unassociated public IP.
+pub async fn delete_publicip(
+    c: &SignedClient,
+    region: &str,
+    project_id: &str,
+    id: &str,
+) -> anyhow::Result<()> {
+    let url = format!("{}/publicips/{id}", vpc_base(region, project_id));
+    c.send_raw(reqwest::Method::DELETE, &url, None, None)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -352,5 +408,15 @@ mod tests {
         let (cidr_c, gw_c) = az_subnet_cidr_and_gateway("sa-brazil-1c");
         assert_eq!(cidr_c, "192.168.2.0/24");
         assert_eq!(gw_c, "192.168.2.1");
+    }
+
+    #[test]
+    fn parses_publicips() {
+        let j = r#"{"publicips":[{"id":"eip-1","status":"FREE","public_ip_address":"1.2.3.4"}]}"#;
+        let r: PublicIpsResp = serde_json::from_str(j).unwrap();
+        assert_eq!(r.publicips.len(), 1);
+        assert_eq!(r.publicips[0].id, "eip-1");
+        assert_eq!(r.publicips[0].status, "FREE");
+        assert_eq!(r.publicips[0].public_ip_address, "1.2.3.4");
     }
 }

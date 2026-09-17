@@ -10,6 +10,7 @@ pub mod ctx;
 pub mod error;
 pub mod hwc;
 pub mod keys;
+pub mod lease;
 pub mod lifecycle;
 pub mod mcp;
 pub mod presets;

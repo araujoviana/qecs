@@ -140,8 +140,8 @@ fn default_env_files() -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(home) = dirs::home_dir() {
         v.push(home.join(".config/qecs/.env"));
-        v.push(home.join("Projetos/python-projs/mcp-hwc/.env"));
     }
+    v.push(PathBuf::from(".env"));
     v
 }
 

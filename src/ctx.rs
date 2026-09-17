@@ -4,6 +4,7 @@ use crate::creds::{self, CredInput, Credentials};
 use crate::hwc::client::SignedClient;
 use crate::telemetry::{Telemetry, TelemetryExt};
 
+#[derive(Clone)]
 pub struct Ctx {
     pub config: Config,
     pub creds: Credentials,

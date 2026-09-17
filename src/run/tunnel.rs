@@ -96,7 +96,7 @@ pub fn find_available_local_port(preferred: u16) -> Option<u16> {
         return Some(preferred);
     }
 
-    for p in (preferred + 1)..=(preferred + 50) {
+    for p in (preferred + 1)..=(preferred + 100) {
         if is_local_port_available(p) {
             return Some(p);
         }

@@ -66,6 +66,7 @@ pub fn wait_deadline_secs(created_at_rfc3339: &str, ttl_secs: u64) -> u64 {
 pub struct GcStats {
     pub removed_from_state: Vec<String>,
     pub deleted_from_cloud: Vec<String>,
+    pub deleted_eips: Vec<String>,
 }
 
 /// Reconcile local state with cloud and purge stopped (`SHUTOFF`) or errored VMs.
@@ -123,6 +124,24 @@ pub async fn reconcile_and_purge(ctx: &Ctx) -> anyhow::Result<GcStats> {
             stats.deleted_from_cloud.push(id.to_string());
             if let Some(r) = local_records.iter().find(|r| &r.id == id) {
                 let _ = store.remove(&r.name);
+            }
+        }
+    }
+
+    // 3. Clean up unattached public IPs associated with tracked VMs
+    if let Ok(publicips) = crate::hwc::vpc::list_publicips(&client, &region, &project.id).await {
+        for p in publicips {
+            if p.status == "FREE" {
+                let was_tracked = local_records
+                    .iter()
+                    .any(|r| r.eip.as_deref() == Some(&p.public_ip_address));
+                if was_tracked
+                    && crate::hwc::vpc::delete_publicip(&client, &region, &project.id, &p.id)
+                        .await
+                        .is_ok()
+                {
+                    stats.deleted_eips.push(p.public_ip_address);
+                }
             }
         }
     }
