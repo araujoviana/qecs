@@ -1,6 +1,10 @@
-# qecs
+<p align="center">
+  <img src="assets/logo.png" alt="qecs logo" width="160">
+</p>
 
-Run code on disposable, high-spec Huawei Cloud (HWC) machines and destroy them the second they finish.
+<h1 align="center">qecs</h1>
+
+<p align="center">Run code on disposable, high-spec Huawei Cloud (HWC) machines and destroy them the second they finish.</p>
 
 `qecs` packages your directory, boots an on-demand Pay-Per-Use VM, runs your workload with live terminal output, pulls your artifacts back, and tears the machine down. No orphaned VMs, no leftover disks, and no manual SSH wrestling.
 
