@@ -167,6 +167,42 @@ fn kill_without_target_when_no_vms_reports_error() {
 }
 
 #[test]
+fn kill_with_vm_id_resolves_from_state_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let qecs_dir = dir.path().join("qecs");
+    std::fs::create_dir_all(&qecs_dir).unwrap();
+    let vms_json = qecs_dir.join("vms.json");
+    let record = serde_json::json!([{
+        "id": "70d2205e-577a-4e6a-b1fb-3ff6dab36a40",
+        "name": "qecs-gpu-9df3",
+        "preset": "gpu",
+        "flavor": "pi2.4xlarge.4",
+        "region": "ap-southeast-3",
+        "az": "ap-southeast-3a",
+        "eip": "1.2.3.4",
+        "private_ip": "192.168.0.10",
+        "created_at": "2026-09-18T00:00:00Z",
+        "ttl_secs": 7200,
+        "tags": []
+    }]);
+    std::fs::write(&vms_json, serde_json::to_string(&record).unwrap()).unwrap();
+
+    let output = qecs()
+        .args(["kill", "70d2205e-577a-4e6a-b1fb-3ff6dab36a40"])
+        .env("XDG_STATE_HOME", dir.path())
+        .env("QECS_AK", "mock")
+        .env("QECS_SK", "mock")
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("not found in state or cloud"),
+        "Should have resolved the VM by ID, but got: {stderr}"
+    );
+}
+
+#[test]
 fn logs_without_active_vms_reports_error() {
     let dir = tempfile::tempdir().unwrap();
     qecs()

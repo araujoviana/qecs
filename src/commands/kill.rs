@@ -54,6 +54,7 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
 
         for r in &records {
             let _ = store.remove(&r.name);
+            let _ = store.remove(&r.id);
             if let Some(ip) = &r.eip {
                 let _ = crate::keys::remove_known_host(ip);
             }
@@ -63,6 +64,7 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
         }
         for s in &cloud_servers {
             let _ = store.remove(&s.name);
+            let _ = store.remove(&s.id);
         }
         println!(
             "{}",
@@ -71,32 +73,80 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let (server_id, vm_name) = match &args.name {
-        Some(name) => {
-            let record = store.get(name)?;
-            let id = match record {
-                Some(r) => r.id,
+    let (server_id, vm_name) =
+        resolve_kill_target(&store, &client, &region, &project.id, args.name.as_deref()).await?;
+
+    let pb = crate::ui::spinner(format!("Deleting VM `{vm_name}`..."));
+    let job_id = ecs::delete_servers(&client, &region, &project.id, &[&server_id]).await?;
+    let _ = jobs::poll_job(
+        &client,
+        Service::Ecs,
+        &region,
+        &project.id,
+        &job_id,
+        &PollConfig::default(),
+        ctx.telemetry.as_ref(),
+    )
+    .await;
+    if let Ok(Some(r)) = store.get(&server_id) {
+        if let Some(ip) = &r.eip {
+            let _ = crate::keys::remove_known_host(ip);
+        }
+        if let Some(ip) = &r.private_ip {
+            let _ = crate::keys::remove_known_host(ip);
+        }
+    }
+    let _ = store.remove(&vm_name);
+    let _ = store.remove(&server_id);
+    pb.finish_and_clear();
+    println!("{}", format!("✓ VM `{vm_name}` killed.").green().bold());
+    Ok(())
+}
+
+pub(crate) async fn resolve_kill_target(
+    store: &StateStore,
+    client: &crate::hwc::client::SignedClient,
+    region: &str,
+    project_id: &str,
+    name: Option<&str>,
+) -> anyhow::Result<(String, String)> {
+    match name {
+        Some(target) => {
+            let record = store.get(target)?;
+            let (id, vname) = match record {
+                Some(r) => (r.id, r.name),
                 None => {
-                    let servers = ecs::list_servers(&client, &region, &project.id).await?;
-                    servers
+                    let servers = ecs::list_servers(client, region, project_id).await?;
+                    let matched = servers
                         .into_iter()
-                        .find(|s| &s.name == name)
-                        .map(|s| s.id)
-                        .ok_or_else(|| anyhow::anyhow!("VM `{name}` not found in state or cloud"))?
+                        .find(|s| s.name == target || s.id == target)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("VM `{target}` not found in state or cloud")
+                        })?;
+                    (matched.id, matched.name)
                 }
             };
-            (id, name.clone())
+            Ok((id, vname))
         }
         None => {
             let records = store.list()?;
             if records.len() == 1 {
                 let r = &records[0];
-                (r.id.clone(), r.name.clone())
+                Ok((r.id.clone(), r.name.clone()))
             } else if records.is_empty() {
-                let servers = ecs::list_servers(&client, &region, &project.id).await?;
+                let all_servers = ecs::list_servers(client, region, project_id).await?;
+                let servers: Vec<_> = all_servers
+                    .into_iter()
+                    .filter(|s| {
+                        s.tags
+                            .iter()
+                            .any(|t| t == "managed-by=qecs" || t == "managed-by")
+                            || s.name.starts_with("qecs-")
+                    })
+                    .collect();
                 if servers.len() == 1 {
                     let s = &servers[0];
-                    (s.id.clone(), s.name.clone())
+                    Ok((s.id.clone(), s.name.clone()))
                 } else if servers.is_empty() {
                     anyhow::bail!("no active VMs found to kill");
                 } else {
@@ -114,30 +164,121 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
                 );
             }
         }
-    };
+    }
+}
 
-    let pb = crate::ui::spinner(format!("Deleting VM `{vm_name}`..."));
-    let job_id = ecs::delete_servers(&client, &region, &project.id, &[&server_id]).await?;
-    jobs::poll_job(
-        &client,
-        Service::Ecs,
-        &region,
-        &project.id,
-        &job_id,
-        &PollConfig::default(),
-        ctx.telemetry.as_ref(),
-    )
-    .await?;
-    if let Ok(Some(r)) = store.get(&vm_name) {
-        if let Some(ip) = &r.eip {
-            let _ = crate::keys::remove_known_host(ip);
-        }
-        if let Some(ip) = &r.private_ip {
-            let _ = crate::keys::remove_known_host(ip);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::VmRecord;
+
+    fn sample_record(id: &str, name: &str) -> VmRecord {
+        VmRecord {
+            id: id.to_string(),
+            name: name.to_string(),
+            preset: "gpu".into(),
+            flavor: "pi2.4xlarge.4".into(),
+            region: "ap-southeast-3".into(),
+            az: "ap-southeast-3a".into(),
+            eip: Some("1.2.3.4".into()),
+            private_ip: Some("192.168.0.10".into()),
+            created_at: "2026-09-18T00:00:00Z".into(),
+            ttl_secs: 7200,
+            connect_port: None,
+            job: None,
+            tags: vec![],
         }
     }
-    let _ = store.remove(&vm_name);
-    pb.finish_and_clear();
-    println!("{}", format!("✓ VM `{vm_name}` killed.").green().bold());
-    Ok(())
+
+    fn dummy_client() -> crate::hwc::client::SignedClient {
+        crate::hwc::client::SignedClient::new(
+            reqwest::Client::new(),
+            crate::creds::Credentials {
+                ak: "mock_ak".into(),
+                sk: "mock_sk".into(),
+                security_token: None,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn resolve_by_name_from_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::at(dir.path().join("vms.json"));
+        store
+            .upsert(sample_record("uuid-1234", "qecs-gpu-demo"))
+            .unwrap();
+        let client = dummy_client();
+
+        let (id, name) = resolve_kill_target(
+            &store,
+            &client,
+            "ap-southeast-3",
+            "proj-123",
+            Some("qecs-gpu-demo"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(id, "uuid-1234");
+        assert_eq!(name, "qecs-gpu-demo");
+    }
+
+    #[tokio::test]
+    async fn resolve_by_id_from_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::at(dir.path().join("vms.json"));
+        store
+            .upsert(sample_record("uuid-1234", "qecs-gpu-demo"))
+            .unwrap();
+        let client = dummy_client();
+
+        let (id, name) = resolve_kill_target(
+            &store,
+            &client,
+            "ap-southeast-3",
+            "proj-123",
+            Some("uuid-1234"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(id, "uuid-1234");
+        assert_eq!(name, "qecs-gpu-demo");
+    }
+
+    #[tokio::test]
+    async fn resolve_no_arg_single_vm() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::at(dir.path().join("vms.json"));
+        store
+            .upsert(sample_record("uuid-1234", "qecs-gpu-demo"))
+            .unwrap();
+        let client = dummy_client();
+
+        let (id, name) = resolve_kill_target(&store, &client, "ap-southeast-3", "proj-123", None)
+            .await
+            .unwrap();
+
+        assert_eq!(id, "uuid-1234");
+        assert_eq!(name, "qecs-gpu-demo");
+    }
+
+    #[tokio::test]
+    async fn resolve_no_arg_multiple_vms_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::at(dir.path().join("vms.json"));
+        store.upsert(sample_record("uuid-1", "qecs-gpu-1")).unwrap();
+        store.upsert(sample_record("uuid-2", "qecs-gpu-2")).unwrap();
+        let client = dummy_client();
+
+        let res = resolve_kill_target(&store, &client, "ap-southeast-3", "proj-123", None).await;
+
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("multiple active VMs found")
+        );
+    }
 }

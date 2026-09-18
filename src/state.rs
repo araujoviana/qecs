@@ -96,8 +96,11 @@ impl StateStore {
         }
     }
 
-    pub fn get(&self, name: &str) -> anyhow::Result<Option<VmRecord>> {
-        Ok(self.list()?.into_iter().find(|r| r.name == name))
+    pub fn get(&self, target: &str) -> anyhow::Result<Option<VmRecord>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|r| r.name == target || r.id == target))
     }
 
     fn write_all(&self, recs: &[VmRecord]) -> anyhow::Result<()> {
@@ -123,11 +126,11 @@ impl StateStore {
         self.write_all(&recs)
     }
 
-    pub fn remove(&self, name: &str) -> anyhow::Result<bool> {
+    pub fn remove(&self, target: &str) -> anyhow::Result<bool> {
         let _lock = self.acquire_lock()?;
         let mut recs = self.list()?;
         let before = recs.len();
-        recs.retain(|r| r.name != name);
+        recs.retain(|r| r.name != target && r.id != target);
         let removed = recs.len() != before;
         if removed {
             self.write_all(&recs)?;
@@ -183,6 +186,29 @@ mod tests {
         assert!(s.remove("a").unwrap());
         assert!(!s.remove("a").unwrap());
         assert_eq!(s.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn get_and_remove_by_id_or_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = StateStore::at(dir.path().join("vms.json"));
+        s.upsert(rec("alpha")).unwrap(); // id is "id-alpha", name is "alpha"
+        s.upsert(rec("beta")).unwrap(); // id is "id-beta", name is "beta"
+
+        // Lookup by name
+        assert_eq!(s.get("alpha").unwrap().unwrap().id, "id-alpha");
+        // Lookup by ID
+        assert_eq!(s.get("id-alpha").unwrap().unwrap().name, "alpha");
+
+        // Remove by ID
+        assert!(s.remove("id-alpha").unwrap());
+        assert!(s.get("alpha").unwrap().is_none());
+        assert!(s.get("id-alpha").unwrap().is_none());
+
+        // Remove by Name
+        assert!(s.remove("beta").unwrap());
+        assert!(s.get("beta").unwrap().is_none());
+        assert_eq!(s.list().unwrap().len(), 0);
     }
 
     #[test]

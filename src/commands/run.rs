@@ -22,6 +22,23 @@ use crate::run::sync;
 use crate::state::StateStore;
 use crate::telemetry::TelemetryExt;
 
+/// Build the remote shell command that tars `.cache`/`.cargo` and uploads it
+/// to OBS via a presigned PUT URL. Bounded with `curl --max-time`: without it,
+/// a slow or stalled upload over a bandwidth-capped connection can silently
+/// eat many minutes of wall time before finally failing (the failure itself
+/// is swallowed by `|| true` since caching is best-effort) - a live run once
+/// lost 681s this way with nothing ever landing in the bucket. Capping the
+/// attempt means a run either caches successfully within the budget or gives
+/// up fast, instead of stalling silently.
+fn build_cache_upload_cmd(put_url: &str) -> String {
+    format!(
+        "if [ -d /home/ubuntu/.cache ] || [ -d /home/ubuntu/.cargo ]; then \
+            tar -czf /tmp/qecs-cache.tar.gz -C /home/ubuntu $([ -d /home/ubuntu/.cache ] && echo .cache) $([ -d /home/ubuntu/.cargo ] && echo .cargo) 2>/dev/null && \
+            curl -sf --max-time 300 -T /tmp/qecs-cache.tar.gz \"{put_url}\" && rm -f /tmp/qecs-cache.tar.gz || true; \
+        fi"
+    )
+}
+
 pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
     // 1. Resolve workdir & detect recipe
     let target_path = args.path.clone().unwrap_or_else(|| PathBuf::from("."));
@@ -67,7 +84,32 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         res = execute_run_pipeline(ctx, &mut lease, &args, &recipe, &effective_run_cmd, &env_vars, final_preset, &paths) => res,
         _ = tokio::signal::ctrl_c() => {
             eprintln!("\n{}", format!("Interrupt received. Tearing down VM `{}`...", lease.record().name).yellow().bold());
-            let _ = lease.teardown().await;
+            if !lease.is_disarmed() && !lease.is_destroyed() {
+                let pb = crate::ui::spinner(format!("Tearing down VM `{}`...", lease.record().name));
+                let teardown_res = lease.teardown().await;
+                pb.finish_and_clear();
+                match teardown_res {
+                    Ok(()) => {
+                        eprintln!(
+                            "{}",
+                            format!("✓ Destroyed ephemeral VM `{}`.", lease.record().name).green()
+                        );
+                    }
+                    Err(teardown_err) => {
+                        eprintln!(
+                            "{}",
+                            format!(
+                                "Warning: failed to tear down VM `{}` ({}): {teardown_err}",
+                                lease.record().name,
+                                lease.record().id
+                            )
+                            .red()
+                            .bold()
+                        );
+                        eprintln!("  Clean up manually with: qecs kill {}", lease.record().id);
+                    }
+                }
+            }
             anyhow::bail!("run cancelled by user");
         }
     };
@@ -76,7 +118,45 @@ pub async fn cmd_run(ctx: &Ctx, args: RunArgs) -> anyhow::Result<()> {
         Ok(()) => Ok(()),
         Err(e) => {
             if !lease.is_disarmed() && !lease.is_destroyed() {
-                let _ = lease.teardown().await;
+                let should_keep = args.keep || args.keep_on_failure;
+                if should_keep {
+                    lease.disarm();
+                    eprintln!(
+                        "{}",
+                        format!("Note: VM `{}` kept alive.", lease.record().name).dimmed()
+                    );
+                    eprintln!(
+                        "  Debug with interactive shell: qecs shell {}",
+                        lease.record().name
+                    );
+                } else {
+                    let pb =
+                        crate::ui::spinner(format!("Tearing down VM `{}`...", lease.record().name));
+                    let teardown_res = lease.teardown().await;
+                    pb.finish_and_clear();
+                    match teardown_res {
+                        Ok(()) => {
+                            eprintln!(
+                                "{}",
+                                format!("✓ Destroyed ephemeral VM `{}`.", lease.record().name)
+                                    .green()
+                            );
+                        }
+                        Err(teardown_err) => {
+                            eprintln!(
+                                "{}",
+                                format!(
+                                    "Warning: failed to tear down VM `{}` ({}): {teardown_err}",
+                                    lease.record().name,
+                                    lease.record().id
+                                )
+                                .red()
+                                .bold()
+                            );
+                            eprintln!("  Clean up manually with: qecs kill {}", lease.record().id);
+                        }
+                    }
+                }
             }
             Err(e)
         }
@@ -200,6 +280,11 @@ async fn execute_run_pipeline(
         None
     };
 
+    // Skip re-uploading the dependency cache when this exact lockfile hash is
+    // already in OBS - tar-ing and re-uploading a multi-GB `.cache`/`.cargo`
+    // tree over a bandwidth-capped connection on every single successful run
+    // (even when nothing changed) previously cost several minutes for no
+    // benefit; a HEAD request costs a fraction of a second.
     let cache_put_url = if let Some(ref key) = cache_key {
         let client = ctx.signed();
         let region = ctx.region();
@@ -227,15 +312,24 @@ async fn execute_run_pipeline(
             );
             effective_setup_cmds.insert(0, restore_cmd);
 
-            let put_url = crate::hwc::obs::generate_presigned_url(
-                client.creds(),
-                &region,
-                &bucket,
-                &object_key,
-                "PUT",
-                1800,
-            );
-            Some(put_url)
+            let already_cached =
+                crate::hwc::obs::object_exists(&client, &region, &bucket, &object_key)
+                    .await
+                    .unwrap_or(false);
+
+            if already_cached {
+                None
+            } else {
+                let put_url = crate::hwc::obs::generate_presigned_url(
+                    client.creds(),
+                    &region,
+                    &bucket,
+                    &object_key,
+                    "PUT",
+                    1800,
+                );
+                Some(put_url)
+            }
         } else {
             None
         }
@@ -247,14 +341,9 @@ async fn execute_run_pipeline(
     let artifact_spec = args.artifacts.as_deref().unwrap_or(&recipe.output_dir);
 
     if args.detach {
-        let cache_upload_cmd = cache_put_url.as_ref().map(|put_url| {
-            format!(
-                "if [ -d /home/ubuntu/.cache ] || [ -d /home/ubuntu/.cargo ]; then \
-                    tar -czf /tmp/qecs-cache.tar.gz -C /home/ubuntu $([ -d /home/ubuntu/.cache ] && echo .cache) $([ -d /home/ubuntu/.cargo ] && echo .cargo) 2>/dev/null && \
-                    curl -sf -T /tmp/qecs-cache.tar.gz \"{put_url}\" && rm -f /tmp/qecs-cache.tar.gz || true; \
-                fi"
-            )
-        });
+        let cache_upload_cmd = cache_put_url
+            .as_ref()
+            .map(|put_url| build_cache_upload_cmd(put_url));
 
         ctx.telemetry.phase_sync("job-exec", || {
             execute::execute_job_detached_full(
@@ -332,12 +421,7 @@ async fn execute_run_pipeline(
         && let Some(ref put_url) = cache_put_url
     {
         let pb = crate::ui::spinner("Saving dependency cache to OBS...");
-        let cache_upload_cmd = format!(
-            "if [ -d /home/ubuntu/.cache ] || [ -d /home/ubuntu/.cargo ]; then \
-                tar -czf /tmp/qecs-cache.tar.gz -C /home/ubuntu $([ -d /home/ubuntu/.cache ] && echo .cache) $([ -d /home/ubuntu/.cargo ] && echo .cargo) 2>/dev/null && \
-                curl -sf -T /tmp/qecs-cache.tar.gz \"{put_url}\" && rm -f /tmp/qecs-cache.tar.gz || true; \
-            fi"
-        );
+        let cache_upload_cmd = build_cache_upload_cmd(put_url);
         let _ = execute::run_remote_command_full(
             &ip,
             port,
@@ -559,6 +643,20 @@ pub async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Resul
             let project = iam::discover_project(&client, &region).await?;
 
             let job_id = ecs::delete_servers(&client, &region, &project.id, &[server_id]).await?;
+
+            if let Ok(store) = StateStore::open() {
+                if let Ok(Some(r)) = store.get(name) {
+                    if let Some(ip) = &r.eip {
+                        let _ = keys::remove_known_host(ip);
+                    }
+                    if let Some(ip) = &r.private_ip {
+                        let _ = keys::remove_known_host(ip);
+                    }
+                }
+                let _ = store.remove(name);
+                let _ = store.remove(server_id);
+            }
+
             let _ = jobs::poll_job(
                 &client,
                 Service::Ecs,
@@ -570,16 +668,6 @@ pub async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Resul
             )
             .await;
 
-            let store = StateStore::open()?;
-            if let Ok(Some(r)) = store.get(name) {
-                if let Some(ip) = &r.eip {
-                    let _ = keys::remove_known_host(ip);
-                }
-                if let Some(ip) = &r.private_ip {
-                    let _ = keys::remove_known_host(ip);
-                }
-            }
-            let _ = store.remove(name);
             anyhow::Ok(())
         })
         .await
@@ -625,7 +713,7 @@ pub async fn wait_for_gpu_ready_full(
             if status == "READY" {
                 return Ok(());
             } else if status == "FAILED" {
-                let log_cmd = "tail -n 25 /var/log/qecs-gpu-setup.log 2>/dev/null || true";
+                let log_cmd = "tail -n 60 /var/log/qecs-gpu-setup.log 2>/dev/null || true";
                 let log_output = connect::build_ssh_command_full(
                     ip,
                     port,
@@ -655,4 +743,30 @@ pub async fn wait_for_gpu_ready_full(
         "Timed out waiting for GPU driver installation after {} seconds on `{ip}`.",
         timeout.as_secs()
     );
+}
+
+#[cfg(test)]
+mod cache_upload_tests {
+    use super::build_cache_upload_cmd;
+
+    #[test]
+    fn caps_the_upload_with_a_bounded_timeout() {
+        let cmd = build_cache_upload_cmd("https://example.com/put");
+        assert!(
+            cmd.contains("--max-time"),
+            "upload must not be able to hang indefinitely: {cmd}"
+        );
+    }
+
+    #[test]
+    fn upload_failure_is_best_effort_and_never_fails_the_run() {
+        let cmd = build_cache_upload_cmd("https://example.com/put");
+        assert!(cmd.contains("|| true"));
+    }
+
+    #[test]
+    fn embeds_the_exact_presigned_url() {
+        let cmd = build_cache_upload_cmd("https://example.com/put?X-Amz-Signature=abc123");
+        assert!(cmd.contains("\"https://example.com/put?X-Amz-Signature=abc123\""));
+    }
 }

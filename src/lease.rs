@@ -48,8 +48,12 @@ impl VmLease {
         if self.disarmed || self.destroyed {
             return Ok(());
         }
-        self.destroyed = true;
-        crate::commands::run::destroy_vm(&self.ctx, &self.record.id, &self.record.name).await
+        let res =
+            crate::commands::run::destroy_vm(&self.ctx, &self.record.id, &self.record.name).await;
+        if res.is_ok() {
+            self.destroyed = true;
+        }
+        res
     }
 }
 
@@ -168,5 +172,17 @@ mod tests {
         };
 
         assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_lease_failed_teardown_does_not_set_destroyed() {
+        let ctx = dummy_ctx();
+        let record = dummy_record();
+        let mut lease = VmLease::new(ctx, record);
+
+        let res = lease.teardown().await;
+        // With dummy context/credentials, destroy_vm fails
+        assert!(res.is_err());
+        assert!(!lease.is_destroyed());
     }
 }

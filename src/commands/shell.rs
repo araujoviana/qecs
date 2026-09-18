@@ -33,7 +33,10 @@ pub async fn resolve_target_vm_in_store(
         let client = ctx.signed();
         let project = iam::discover_project(&client, &region).await?;
         let servers = ecs::list_servers(&client, &region, &project.id).await?;
-        if let Some(server) = servers.into_iter().find(|s| s.name == target_name) {
+        if let Some(server) = servers
+            .into_iter()
+            .find(|s| s.name == target_name || s.id == target_name)
+        {
             let rec = VmRecord {
                 id: server.id,
                 name: server.name,
@@ -214,6 +217,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(vm.name, "target-box");
+    }
+
+    #[tokio::test]
+    async fn resolve_explicit_id_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::at(dir.path().join("vms.json"));
+        store
+            .upsert(sample_vm("target-box", "2026-09-06T10:00:00Z"))
+            .unwrap();
+        let ctx = mock_ctx();
+
+        let (_store, vm) = resolve_target_vm_in_store(store, &ctx, Some("id-target-box"))
+            .await
+            .unwrap();
+        assert_eq!(vm.name, "target-box");
+        assert_eq!(vm.id, "id-target-box");
     }
 
     #[tokio::test]

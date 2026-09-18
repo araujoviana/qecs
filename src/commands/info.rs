@@ -20,7 +20,7 @@ pub async fn cmd_info(ctx: &Ctx, args: InfoArgs) -> anyhow::Result<()> {
             let servers = ecs::list_servers(&client, &region, &project.id).await?;
             servers
                 .into_iter()
-                .find(|s| s.name == args.name)
+                .find(|s| s.name == args.name || s.id == args.name)
                 .map(|s| s.id)
                 .ok_or_else(|| anyhow::anyhow!("VM `{}` not found in state or cloud", args.name))?
         }
