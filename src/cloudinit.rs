@@ -59,12 +59,21 @@ pub fn render_cloudinit(
       echo "INSTALLING" > /run/qecs/gpu.status
       echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] Initializing GPU driver setup..." | tee -a "$LOG"
 
-      # 0. Fast-path: Check if pre-baked GPU drivers are already operational
+      # 0. Fast-path: Check if pre-baked GPU drivers are already operational AND new
+      # enough for current CUDA wheels. `nvidia-smi` succeeding is not sufficient on its
+      # own: a gold image can ship an old driver (e.g. CUDA-11-era) that `nvidia-smi`
+      # reports as healthy, but `pip install torch` pulls wheels built for CUDA 12.x,
+      # which then silently disable CUDA and fall back to CPU with no error. Require a
+      # driver new enough for that (>=535, matching the branch this script installs below).
       if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >> "$LOG" 2>&1; then
-          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] Pre-baked GPU drivers detected and functional." | tee -a "$LOG"
-          touch /run/qecs/gpu.ready
-          echo "READY" > /run/qecs/gpu.status
-          exit 0
+          DRIVER_VERSION="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2>/dev/null | head -n1 | cut -d. -f1)"
+          if echo "$DRIVER_VERSION" | grep -qE '^[0-9]+$' && [ "$DRIVER_VERSION" -ge 535 ]; then
+              echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] Pre-baked GPU driver $DRIVER_VERSION detected and functional." | tee -a "$LOG"
+              touch /run/qecs/gpu.ready
+              echo "READY" > /run/qecs/gpu.status
+              exit 0
+          fi
+          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] Pre-baked driver ($DRIVER_VERSION) is older than required (>=535); reinstalling." | tee -a "$LOG"
       fi
 
       # 1. Blacklist nouveau if loaded
@@ -96,15 +105,21 @@ pub fn render_cloudinit(
           gnupg \
           pciutils >> "$LOG" 2>&1 || true
 
-      # 4. Install NVIDIA server driver
+      # 4. Install NVIDIA server driver. Try explicit DKMS-based packages
+      # FIRST, before falling back to ubuntu-drivers' auto-pick: it can
+      # select a "no-dkms" prebuilt kernel module built against a specific
+      # kernel point-release, which silently mismatches this VM's actual
+      # running kernel - the module still loads (modprobe exits 0) but
+      # nvidia-smi then reports "Driver/library version mismatch", and no
+      # reboot fixes a wrong prebuilt binary. DKMS compiles the module
+      # locally against the headers installed in step 3, so it always
+      # matches the kernel actually running, at the cost of a slower install.
       echo "[qecs-gpu] Installing NVIDIA server driver..." >> "$LOG"
       INSTALLED=0
 
-      if command -v ubuntu-drivers >/dev/null 2>&1; then
-          ubuntu-drivers install --gpgpu >> "$LOG" 2>&1 && INSTALLED=1
-      fi
+      apt-get install -y --no-install-recommends nvidia-headless-535-server nvidia-dkms-535-server nvidia-utils-535-server >> "$LOG" 2>&1 && INSTALLED=1
       if [ "$INSTALLED" -ne 1 ]; then
-          apt-get install -y --no-install-recommends nvidia-headless-535-server nvidia-utils-535-server >> "$LOG" 2>&1 && INSTALLED=1
+          apt-get install -y --no-install-recommends nvidia-headless-550-server nvidia-dkms-550-server nvidia-utils-550-server >> "$LOG" 2>&1 && INSTALLED=1
       fi
       if [ "$INSTALLED" -ne 1 ]; then
           apt-get install -y --no-install-recommends nvidia-driver-535-server >> "$LOG" 2>&1 && INSTALLED=1
@@ -112,12 +127,68 @@ pub fn render_cloudinit(
       if [ "$INSTALLED" -ne 1 ]; then
           apt-get install -y --no-install-recommends nvidia-driver-550-server >> "$LOG" 2>&1 && INSTALLED=1
       fi
+      if [ "$INSTALLED" -ne 1 ] && command -v ubuntu-drivers >/dev/null 2>&1; then
+          ubuntu-drivers install --gpgpu >> "$LOG" 2>&1 && INSTALLED=1
+      fi
 
-      # 5. Load kernel modules
-      modprobe nvidia >> "$LOG" 2>&1 || true
-      modprobe nvidia_uvm >> "$LOG" 2>&1 || true
+      echo "[qecs-gpu] Installed nvidia packages:" >> "$LOG"
+      dpkg -l | grep -i nvidia >> "$LOG" 2>&1 || echo "  none found" >> "$LOG"
 
-      # 6. Install nvidia-container-toolkit for Docker
+      # 5. Load kernel modules. If the fast-path check above already probed
+      # `nvidia-smi` once, that autoloaded whatever (stale) module the gold image
+      # shipped - `modprobe nvidia` is then a no-op against an already-resident
+      # module, leaving the OLD kernel module loaded against the NEW userspace
+      # driver just installed ("NVML: Driver/library version mismatch"). A reboot
+      # would clear this but costs too much provisioning time here, so unload the
+      # stale stack explicitly (dependents first) before reloading. Log the exit
+      # code of every step un-swallowed (no blanket `|| true`) so a failure to
+      # unload is diagnosable from the captured log instead of silently retrying
+      # into the same mismatch.
+      echo "[qecs-gpu] Pre-unload nvidia module/process state:" >> "$LOG"
+      lsmod | grep -i nvidia >> "$LOG" 2>&1 || echo "  no nvidia modules loaded" >> "$LOG"
+      if command -v fuser >/dev/null 2>&1; then
+          fuser -v /dev/nvidia* >> "$LOG" 2>&1 || echo "  fuser: nothing holding /dev/nvidia*" >> "$LOG"
+      else
+          echo "  fuser not installed, skipping open-handle check" >> "$LOG"
+      fi
+
+      systemctl stop nvidia-persistenced >> "$LOG" 2>&1
+      echo "  systemctl stop nvidia-persistenced exit=$?" >> "$LOG"
+      for mod in nvidia_uvm nvidia_drm nvidia_modeset nvidia; do
+          modprobe -r "$mod" >> "$LOG" 2>&1
+          echo "  modprobe -r $mod exit=$?" >> "$LOG"
+      done
+
+      echo "[qecs-gpu] Post-unload nvidia module state:" >> "$LOG"
+      lsmod | grep -i nvidia >> "$LOG" 2>&1 || echo "  no nvidia modules loaded" >> "$LOG"
+
+      modprobe nvidia >> "$LOG" 2>&1
+      echo "  modprobe nvidia exit=$?" >> "$LOG"
+      modprobe nvidia_uvm >> "$LOG" 2>&1
+      echo "  modprobe nvidia_uvm exit=$?" >> "$LOG"
+
+      echo "[qecs-gpu] Post-reload nvidia module state:" >> "$LOG"
+      lsmod | grep -i nvidia >> "$LOG" 2>&1 || echo "  no nvidia modules loaded" >> "$LOG"
+
+      echo "[qecs-gpu] Running kernel vs loaded module build:" >> "$LOG"
+      echo "  uname -r: $(uname -r)" >> "$LOG"
+      modinfo nvidia 2>>"$LOG" | grep -E '^(version|vermagic):' >> "$LOG" || echo "  modinfo nvidia failed" >> "$LOG"
+
+      # 6. Verify the driver works BEFORE spending time on container-toolkit.
+      # A broken kernel/userspace module pairing here won't be fixed by
+      # anything docker-related, so fail fast here - this also keeps the
+      # unload/reload diagnostics above at the tail of the log instead of
+      # losing them under the container-toolkit install's verbose apt/curl/gpg
+      # output, which was silently swallowing them before.
+      echo "[qecs-gpu] Verifying with nvidia-smi..." >> "$LOG"
+      if ! { command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >> "$LOG" 2>&1; }; then
+          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] ERROR: nvidia-smi failed after module reload." | tee -a "$LOG"
+          touch /run/qecs/gpu.failed
+          echo "FAILED" > /run/qecs/gpu.status
+          exit 1
+      fi
+
+      # 7. Install nvidia-container-toolkit for Docker
       echo "[qecs-gpu] Installing nvidia-container-toolkit..." >> "$LOG"
       curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg >> "$LOG" 2>&1 || true
       curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
@@ -131,19 +202,10 @@ pub fn render_cloudinit(
           systemctl restart docker 2>/dev/null || true
       fi
 
-      # 7. Verification check
-      echo "[qecs-gpu] Verifying with nvidia-smi..." >> "$LOG"
-      if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >> "$LOG" 2>&1; then
-          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] GPU operational." | tee -a "$LOG"
-          touch /run/qecs/gpu.ready
-          echo "READY" > /run/qecs/gpu.status
-          exit 0
-      else
-          echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] ERROR: nvidia-smi failed." | tee -a "$LOG"
-          touch /run/qecs/gpu.failed
-          echo "FAILED" > /run/qecs/gpu.status
-          exit 1
-      fi
+      echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [qecs-gpu] GPU operational." | tee -a "$LOG"
+      touch /run/qecs/gpu.ready
+      echo "READY" > /run/qecs/gpu.status
+      exit 0
 
   - path: /etc/systemd/system/qecs-gpu-setup.service
     permissions: "0644"
@@ -386,7 +448,55 @@ mod tests {
         assert!(rendered.contains("nvidia-container-toolkit"));
         assert!(rendered.contains("/run/qecs/gpu.ready"));
         assert!(rendered.contains("/run/qecs/gpu.failed"));
+
+        // Fast-path must gate on a real driver version, not just "nvidia-smi exits 0" -
+        // an old pre-baked driver can pass nvidia-smi but be too old for current CUDA
+        // wheels, silently downgrading the job to CPU.
+        assert!(rendered.contains("--query-gpu=driver_version"));
+        assert!(rendered.contains("DRIVER_VERSION\" -ge 535"));
+
+        // A stale module can already be resident (autoloaded by the fast-path's own
+        // nvidia-smi probe above) even after installing a newer driver package; a
+        // plain `modprobe nvidia` is a no-op against it, so the script must unload
+        // the old module stack before reloading rather than relying on a reboot.
+        assert!(rendered.contains("for mod in nvidia_uvm nvidia_drm nvidia_modeset nvidia"));
+        assert!(rendered.contains("modprobe -r \"$mod\""));
+        assert!(rendered.contains("nvidia-persistenced"));
         assert!(rendered.contains("nvidia-smi"));
+
+        // Diagnostics must be un-swallowed (no blanket `|| true`) and placed where
+        // the 60-line log tail qecs captures on failure will actually include them -
+        // a failed unload should be diagnosable, not silently retried into the same
+        // "Driver/library version mismatch".
+        assert!(rendered.contains("modprobe -r $mod exit="));
+        assert!(rendered.contains("Post-reload nvidia module state"));
+
+        // Verification must happen right after the module reload, BEFORE the
+        // verbose nvidia-container-toolkit install - otherwise a failure's log
+        // tail is all apt/curl/gpg noise and the reload diagnostics above are
+        // pushed out of view.
+        let verify_pos = rendered.find("Verifying with nvidia-smi").unwrap();
+        let toolkit_pos = rendered
+            .find("Installing nvidia-container-toolkit")
+            .unwrap();
+        assert!(verify_pos < toolkit_pos);
+
+        // `ubuntu-drivers install --gpgpu` can auto-pick a "no-dkms" prebuilt
+        // kernel module built against a specific kernel point-release, which
+        // silently mismatches this VM's actual running kernel. Explicit
+        // DKMS-based packages (compiled locally against the headers from
+        // step 3) must be tried first; ubuntu-drivers stays only as a
+        // last-resort fallback.
+        assert!(rendered.contains("nvidia-dkms-535-server"));
+        assert!(rendered.contains("nvidia-dkms-550-server"));
+        let dkms_pos = rendered.find("nvidia-dkms-535-server").unwrap();
+        let ubuntu_drivers_pos = rendered.find("ubuntu-drivers install --gpgpu").unwrap();
+        assert!(dkms_pos < ubuntu_drivers_pos);
+
+        // vermagic diagnostic: if a mismatch happens again, this proves or
+        // disproves the prebuilt-vs-running-kernel theory directly instead of
+        // requiring another guess-and-burn-a-VM cycle.
+        assert!(rendered.contains("vermagic"));
     }
 
     #[test]

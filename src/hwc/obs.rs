@@ -93,7 +93,7 @@ pub async fn ensure_cache_bucket(
 
     // 1. Check if bucket already exists
     let (status, _) = client
-        .send_raw(Method::GET, &url, None, None)
+        .send_obs(Method::GET, &url, region, None, None)
         .await
         .unwrap_or((0, String::new()));
 
@@ -109,9 +109,10 @@ pub async fn ensure_cache_bucket(
     );
 
     let (put_status, body) = client
-        .send_raw(
+        .send_obs(
             Method::PUT,
             &url,
+            region,
             Some("application/xml"),
             Some(create_xml.as_bytes()),
         )
@@ -155,9 +156,10 @@ pub async fn configure_lifecycle(
     );
 
     let (status, body) = client
-        .send_raw(
+        .send_obs(
             Method::PUT,
             &url,
+            region,
             Some("application/xml"),
             Some(lifecycle_xml.as_bytes()),
         )
@@ -181,7 +183,7 @@ pub async fn list_cache_objects(
 ) -> anyhow::Result<Vec<ObsObject>> {
     let url = format!("{}/", bucket_url(region, bucket));
     let (status, body) = client
-        .send_raw(Method::GET, &url, None, None)
+        .send_obs(Method::GET, &url, region, None, None)
         .await
         .context("listing OBS cache objects")?;
 
@@ -198,6 +200,33 @@ pub async fn list_cache_objects(
     Ok(parse_list_bucket_xml(&body))
 }
 
+/// Check whether a cache object already exists in OBS via a HEAD request.
+/// Used to skip re-uploading an unchanged dependency cache: a HEAD is a few
+/// hundred bytes on the wire, versus tar-ing and re-uploading a multi-GB
+/// `.cache`/`.cargo` tree over a bandwidth-capped connection every run.
+pub async fn object_exists(
+    client: &SignedClient,
+    region: &str,
+    bucket: &str,
+    key: &str,
+) -> anyhow::Result<bool> {
+    let url = format!(
+        "{}/{}",
+        bucket_url(region, bucket),
+        key.trim_start_matches('/')
+    );
+    let (status, body) = client
+        .send_obs(Method::HEAD, &url, region, None, None)
+        .await
+        .context("checking OBS cache object existence")?;
+
+    match status {
+        200 => Ok(true),
+        404 => Ok(false),
+        _ => anyhow::bail!("failed to check OBS object `{key}`: status {status}, response: {body}"),
+    }
+}
+
 /// Delete a specific cache object from OBS.
 pub async fn delete_cache_object(
     client: &SignedClient,
@@ -211,7 +240,7 @@ pub async fn delete_cache_object(
         key.trim_start_matches('/')
     );
     let (status, body) = client
-        .send_raw(Method::DELETE, &url, None, None)
+        .send_obs(Method::DELETE, &url, region, None, None)
         .await
         .context("deleting OBS cache object")?;
 
@@ -250,7 +279,7 @@ pub async fn destroy_cache_bucket(
     // 2. Delete bucket
     let url = format!("{}/", bucket_url(region, bucket));
     let (status, body) = client
-        .send_raw(Method::DELETE, &url, None, None)
+        .send_obs(Method::DELETE, &url, region, None, None)
         .await
         .context("destroying OBS bucket")?;
 
@@ -259,6 +288,120 @@ pub async fn destroy_cache_bucket(
     }
 
     Ok(())
+}
+
+/// Derive the AWS SigV4 signing key: `HMAC(HMAC(HMAC(HMAC("AWS4"+sk, date), region), service), "aws4_request")`.
+/// Shared by the presigned-URL signer below and the header-based signer used for direct
+/// (non-presigned) OBS bucket admin calls, so both paths use identical, tested crypto.
+fn sigv4_signing_key(sk: &str, date_stamp: &str, region: &str, service: &str) -> Vec<u8> {
+    let k_secret = format!("AWS4{sk}");
+    let mut mac =
+        HmacSha256::new_from_slice(k_secret.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(date_stamp.as_bytes());
+    let k_date = mac.finalize().into_bytes();
+
+    let mut mac = HmacSha256::new_from_slice(&k_date).unwrap();
+    mac.update(region.as_bytes());
+    let k_region = mac.finalize().into_bytes();
+
+    let mut mac = HmacSha256::new_from_slice(&k_region).unwrap();
+    mac.update(service.as_bytes());
+    let k_service = mac.finalize().into_bytes();
+
+    let mut mac = HmacSha256::new_from_slice(&k_service).unwrap();
+    mac.update(b"aws4_request");
+    mac.finalize().into_bytes().to_vec()
+}
+
+fn sigv4_sign(
+    sk: &str,
+    date_stamp: &str,
+    region: &str,
+    service: &str,
+    string_to_sign: &str,
+) -> String {
+    let k_signing = sigv4_signing_key(sk, date_stamp, region, service);
+    let mut mac = HmacSha256::new_from_slice(&k_signing).unwrap();
+    mac.update(string_to_sign.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Build AWS SigV4 header-based authorization for a direct (non-presigned) OBS request.
+///
+/// OBS's S3-compatible API does not understand the HWC `SDK-HMAC-SHA256` scheme that
+/// `SignedClient::send_raw` uses for ECS/VPC/IAM/IMS calls, so bucket admin operations
+/// (create/list/delete) need this separate SigV4 header signer instead.
+pub(crate) fn sigv4_auth_headers(
+    creds: &Credentials,
+    region: &str,
+    method: &str,
+    url: &str,
+    body: &[u8],
+) -> Vec<(String, String)> {
+    let now = chrono::Utc::now();
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date_stamp = now.format("%Y%m%d").to_string();
+
+    let parsed = reqwest::Url::parse(url).expect("valid url");
+    let host = parsed.host_str().expect("url has host").to_string();
+    let canonical_uri = if parsed.path().is_empty() {
+        "/".to_string()
+    } else {
+        parsed.path().to_string()
+    };
+
+    let mut query_params: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    query_params.sort();
+    let canonical_query_str = query_params
+        .iter()
+        .map(|(k, v)| format!("{}={}", pct(k), pct(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let payload_hash = hex::encode(Sha256::digest(body));
+
+    let mut header_pairs: Vec<(String, String)> = vec![
+        ("host".into(), host.clone()),
+        ("x-amz-content-sha256".into(), payload_hash.clone()),
+        ("x-amz-date".into(), amz_date.clone()),
+    ];
+    if let Some(ref tok) = creds.security_token {
+        header_pairs.push(("x-amz-security-token".into(), tok.clone()));
+    }
+    header_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let canonical_headers: String = header_pairs
+        .iter()
+        .map(|(k, v)| format!("{k}:{v}\n"))
+        .collect();
+    let signed_headers = header_pairs
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect::<Vec<_>>()
+        .join(";");
+
+    let canonical_request = format!(
+        "{method}\n{canonical_uri}\n{canonical_query_str}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    );
+    let hashed_canonical_request = hex::encode(Sha256::digest(canonical_request.as_bytes()));
+
+    let credential_scope = format!("{date_stamp}/{region}/s3/aws4_request");
+    let string_to_sign =
+        format!("AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashed_canonical_request}");
+
+    let signature = sigv4_sign(&creds.sk, &date_stamp, region, "s3", &string_to_sign);
+
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{credential_scope},SignedHeaders={signed_headers},Signature={signature}",
+        creds.ak
+    );
+
+    let mut headers = header_pairs;
+    headers.push(("authorization".into(), authorization));
+    headers
 }
 
 /// Generate an S3 V4 presigned URL for direct, intra-region ECS-to-OBS data transfers.
@@ -319,28 +462,7 @@ pub fn generate_presigned_url(
     let string_to_sign =
         format!("AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashed_canonical_request}");
 
-    // Derive Signing Key
-    let k_secret = format!("AWS4{}", creds.sk);
-    let mut mac =
-        HmacSha256::new_from_slice(k_secret.as_bytes()).expect("HMAC can take key of any size");
-    mac.update(date_stamp.as_bytes());
-    let k_date = mac.finalize().into_bytes();
-
-    let mut mac = HmacSha256::new_from_slice(&k_date).unwrap();
-    mac.update(region.as_bytes());
-    let k_region = mac.finalize().into_bytes();
-
-    let mut mac = HmacSha256::new_from_slice(&k_region).unwrap();
-    mac.update(b"s3");
-    let k_service = mac.finalize().into_bytes();
-
-    let mut mac = HmacSha256::new_from_slice(&k_service).unwrap();
-    mac.update(b"aws4_request");
-    let k_signing = mac.finalize().into_bytes();
-
-    let mut mac = HmacSha256::new_from_slice(&k_signing).unwrap();
-    mac.update(string_to_sign.as_bytes());
-    let signature = hex::encode(mac.finalize().into_bytes());
+    let signature = sigv4_sign(&creds.sk, &date_stamp, region, "s3", &string_to_sign);
 
     format!("https://{host}{canonical_uri}?{canonical_query_str}&X-Amz-Signature={signature}")
 }
@@ -440,5 +562,97 @@ mod tests {
         );
 
         assert!(url.contains("X-Amz-Security-Token=TESTTOKEN123"));
+    }
+
+    #[test]
+    fn sigv4_auth_headers_signs_bucket_root_request() {
+        let creds = Credentials {
+            ak: "TESTAK1234567890".into(),
+            sk: "TESTSK1234567890SECRETKEY".into(),
+            security_token: None,
+        };
+
+        let headers = sigv4_auth_headers(
+            &creds,
+            "ap-southeast-3",
+            "GET",
+            "https://qecs-cache-demo.obs.ap-southeast-3.myhuaweicloud.com/",
+            b"",
+        );
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        };
+
+        assert_eq!(
+            get("host").as_deref(),
+            Some("qecs-cache-demo.obs.ap-southeast-3.myhuaweicloud.com")
+        );
+        assert!(get("x-amz-date").is_some());
+        // empty-body SHA256
+        assert_eq!(
+            get("x-amz-content-sha256").as_deref(),
+            Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+        let auth = get("authorization").unwrap();
+        assert!(auth.starts_with("AWS4-HMAC-SHA256 Credential=TESTAK1234567890/"));
+        assert!(auth.contains("/ap-southeast-3/s3/aws4_request"));
+        assert!(auth.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date"));
+        assert!(auth.contains("Signature="));
+        assert!(get("x-amz-security-token").is_none());
+    }
+
+    #[test]
+    fn sigv4_auth_headers_includes_security_token_when_present() {
+        let creds = Credentials {
+            ak: "TESTAK1234567890".into(),
+            sk: "TESTSK1234567890SECRETKEY".into(),
+            security_token: Some("TESTTOKEN123".into()),
+        };
+
+        let headers = sigv4_auth_headers(
+            &creds,
+            "ap-southeast-3",
+            "PUT",
+            "https://qecs-cache-demo.obs.ap-southeast-3.myhuaweicloud.com/",
+            b"<CreateBucketConfiguration/>",
+        );
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+
+        assert_eq!(get("x-amz-security-token"), Some("TESTTOKEN123"));
+        let auth = get("authorization").unwrap();
+        assert!(
+            auth.contains(
+                "SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+            )
+        );
+    }
+
+    #[test]
+    fn sigv4_auth_headers_signature_changes_with_body() {
+        let creds = Credentials {
+            ak: "TESTAK1234567890".into(),
+            sk: "TESTSK1234567890SECRETKEY".into(),
+            security_token: None,
+        };
+        let url = "https://qecs-cache-demo.obs.ap-southeast-3.myhuaweicloud.com/";
+
+        let h1 = sigv4_auth_headers(&creds, "ap-southeast-3", "PUT", url, b"a");
+        let h2 = sigv4_auth_headers(&creds, "ap-southeast-3", "PUT", url, b"b");
+        let sig = |h: &[(String, String)]| {
+            h.iter()
+                .find(|(k, _)| k == "authorization")
+                .unwrap()
+                .1
+                .clone()
+        };
+        assert_ne!(sig(&h1), sig(&h2));
     }
 }

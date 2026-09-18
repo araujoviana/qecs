@@ -126,6 +126,50 @@ impl SignedClient {
         content_type: Option<&str>,
         body: Option<&[u8]>,
     ) -> Result<(u16, String), ApiError> {
+        let headers = self.signed_headers_for_content(&method, url, content_type, body);
+        self.send_with_headers(method, url, headers, body).await
+    }
+
+    /// Send a request signed with AWS SigV4 headers instead of the HWC `SDK-HMAC-SHA256`
+    /// scheme. Required for OBS bucket admin calls (create/list/delete) - OBS's
+    /// S3-compatible API does not authenticate against the HWC scheme used for
+    /// ECS/VPC/IAM/IMS in `send_raw`.
+    pub async fn send_obs(
+        &self,
+        method: Method,
+        url: &str,
+        region: &str,
+        content_type: Option<&str>,
+        body: Option<&[u8]>,
+    ) -> Result<(u16, String), ApiError> {
+        let body_bytes = body.unwrap_or(b"");
+        let signed = crate::hwc::obs::sigv4_auth_headers(
+            &self.creds,
+            region,
+            method.as_str(),
+            url,
+            body_bytes,
+        );
+
+        let mut headers = HeaderMap::new();
+        for (k, v) in signed {
+            let name = HeaderName::from_bytes(k.as_bytes()).expect("valid header name");
+            headers.insert(name, HeaderValue::from_str(&v).expect("valid header value"));
+        }
+        if let Some(ct) = content_type {
+            headers.insert("Content-Type", HeaderValue::from_str(ct).unwrap());
+        }
+
+        self.send_with_headers(method, url, headers, body).await
+    }
+
+    async fn send_with_headers(
+        &self,
+        method: Method,
+        url: &str,
+        headers: HeaderMap,
+        body: Option<&[u8]>,
+    ) -> Result<(u16, String), ApiError> {
         let t0 = Instant::now();
         let method_str = method.to_string();
         let parsed_url = reqwest::Url::parse(url).ok();
@@ -140,7 +184,6 @@ impl SignedClient {
             .unwrap_or("")
             .to_string();
 
-        let headers = self.signed_headers_for_content(&method, url, content_type, body);
         let mut req = self.http.request(method, url).headers(headers);
         if let Some(r) = body {
             req = req.body(r.to_vec());
