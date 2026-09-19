@@ -1,12 +1,23 @@
 <p align="center">
-  <img src="assets/logo.png" alt="qecs logo" width="160">
+  <img src="assets/logo.png" alt="qecs logo" width="140">
 </p>
 
 <h1 align="center">qecs</h1>
 
-<p align="center">Run code on disposable, high-spec Huawei Cloud (HWC) machines and destroy them the second they finish.</p>
+<p align="center"><strong>Ephemeral Huawei Cloud compute.</strong> Boot a high-spec box, run one job, watch it disappear.</p>
 
-`qecs` packages your directory, boots an on-demand Pay-Per-Use VM, runs your workload with live terminal output, pulls your artifacts back, and tears the machine down. No orphaned VMs, no leftover disks, and no manual SSH wrestling.
+<p align="center">
+  <a href="https://github.com/araujoviana/qecs/actions/workflows/ci.yml"><img src="https://github.com/araujoviana/qecs/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <img src="https://img.shields.io/badge/platform-linux--x86__64-4c566a" alt="Platform: Linux x86_64">
+  <img src="https://img.shields.io/badge/rust-edition%202024-b5622b" alt="Rust edition 2024">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2f6f5e" alt="License: MIT"></a>
+</p>
+
+`qecs` packages your working directory, boots an on-demand Pay-Per-Use VM, runs your workload with live terminal output, pulls your artifacts back, and destroys the machine. No orphaned VMs, no leftover disks, no manual SSH wrestling.
+
+## Why
+
+A GPU box left running bills you while it's idle and drifts state between jobs. `qecs` treats a VM like a build artifact instead of a pet: provisioned for one job, destroyed the moment it exits, billed only for the minutes it actually ran. Every VM also carries a hard TTL baked into its own cloud-init, so a crashed laptop or a dropped connection can't leave a meter running unattended.
 
 ## Quick Start
 
@@ -138,6 +149,8 @@ cargo fmt --check                        # style check
 
 Commits use Conventional Commits (`feat:`, `fix:`, `docs:`) to drive automatic version bumping via git hooks.
 
+---
+
 ## License
 
-MIT
+[MIT](LICENSE)
