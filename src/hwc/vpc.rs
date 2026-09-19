@@ -5,7 +5,7 @@
 //! only create when nothing is there. A freshly created subnet starts `UNKNOWN`
 //! and must reach `ACTIVE` before an ECS can use it, so `ensure_subnet` polls.
 use crate::hwc::client::SignedClient;
-use crate::hwc::endpoints::{Service, endpoint_host};
+use crate::hwc::endpoints::{Service, endpoint_url};
 use crate::hwc::wait::{Poll, PollConfig, poll_until};
 use serde::Deserialize;
 use serde_json::json;
@@ -70,10 +70,7 @@ pub struct PublicIpsResp {
 /// `https://vpc.<region>.myhuaweicloud.com/v1/<project_id>` - the base every VPC,
 /// subnet, security-group and EIP call hangs off.
 pub(crate) fn vpc_base(region: &str, project_id: &str) -> String {
-    format!(
-        "https://{}/v1/{project_id}",
-        endpoint_host(Service::Vpc, region)
-    )
+    format!("{}/v1/{project_id}", endpoint_url(Service::Vpc, region))
 }
 
 fn create_vpc_body(name: &str, cidr: &str) -> serde_json::Value {

@@ -67,10 +67,11 @@ pub struct GcStats {
     pub removed_from_state: Vec<String>,
     pub deleted_from_cloud: Vec<String>,
     pub deleted_eips: Vec<String>,
+    pub untracked_active_kept: Vec<String>,
 }
 
-/// Reconcile local state with cloud and purge stopped (`SHUTOFF`) or errored VMs.
-pub async fn reconcile_and_purge(ctx: &Ctx) -> anyhow::Result<GcStats> {
+/// Reconcile local state with cloud and purge stopped (`SHUTOFF`), errored, and untracked active VMs.
+pub async fn reconcile_and_purge(ctx: &Ctx, force: bool) -> anyhow::Result<GcStats> {
     let store = StateStore::open()?;
     let region = ctx.region();
     let client = ctx.signed();
@@ -85,6 +86,7 @@ pub async fn reconcile_and_purge(ctx: &Ctx) -> anyhow::Result<GcStats> {
     for rec in &local_records {
         if !cloud_servers.iter().any(|s| s.id == rec.id) {
             store.remove(&rec.name)?;
+            store.remove(&rec.id)?;
             if let Some(ip) = &rec.eip {
                 let _ = crate::keys::remove_known_host(ip);
             }
@@ -95,8 +97,8 @@ pub async fn reconcile_and_purge(ctx: &Ctx) -> anyhow::Result<GcStats> {
         }
     }
 
-    // 2. Find managed cloud servers that are stopped or errored and clean them up
-    let dead_servers: Vec<&str> = cloud_servers
+    // 2. Classify managed cloud servers
+    let qecs_servers: Vec<&ecs::Server> = cloud_servers
         .iter()
         .filter(|s| {
             s.tags
@@ -104,12 +106,31 @@ pub async fn reconcile_and_purge(ctx: &Ctx) -> anyhow::Result<GcStats> {
                 .any(|t| t == "managed-by=qecs" || t == "managed-by")
                 || s.name.starts_with("qecs-")
         })
+        .collect();
+
+    let mut servers_to_delete: Vec<&str> = qecs_servers
+        .iter()
         .filter(|s| s.status == "SHUTOFF" || s.status == "ERROR")
         .map(|s| s.id.as_str())
         .collect();
 
-    if !dead_servers.is_empty() {
-        let job_id = ecs::delete_servers(&client, &region, &project.id, &dead_servers).await?;
+    for s in &qecs_servers {
+        if s.status != "SHUTOFF" && s.status != "ERROR" {
+            let is_tracked = local_records
+                .iter()
+                .any(|r| r.id == s.id || r.name == s.name);
+            if !is_tracked {
+                if force {
+                    servers_to_delete.push(s.id.as_str());
+                } else {
+                    stats.untracked_active_kept.push(s.name.clone());
+                }
+            }
+        }
+    }
+
+    if !servers_to_delete.is_empty() {
+        let job_id = ecs::delete_servers(&client, &region, &project.id, &servers_to_delete).await?;
         jobs::poll_job(
             &client,
             Service::Ecs,
@@ -120,28 +141,24 @@ pub async fn reconcile_and_purge(ctx: &Ctx) -> anyhow::Result<GcStats> {
             ctx.telemetry.as_ref(),
         )
         .await?;
-        for id in &dead_servers {
+        for id in &servers_to_delete {
             stats.deleted_from_cloud.push(id.to_string());
-            if let Some(r) = local_records.iter().find(|r| &r.id == id) {
+            let _ = store.remove(id);
+            if let Some(r) = local_records.iter().find(|r| &r.id == id || &r.name == id) {
                 let _ = store.remove(&r.name);
             }
         }
     }
 
-    // 3. Clean up unattached public IPs associated with tracked VMs
+    // 3. Clean up unattached public IPs (FREE) in the project
     if let Ok(publicips) = crate::hwc::vpc::list_publicips(&client, &region, &project.id).await {
         for p in publicips {
-            if p.status == "FREE" {
-                let was_tracked = local_records
-                    .iter()
-                    .any(|r| r.eip.as_deref() == Some(&p.public_ip_address));
-                if was_tracked
-                    && crate::hwc::vpc::delete_publicip(&client, &region, &project.id, &p.id)
-                        .await
-                        .is_ok()
-                {
-                    stats.deleted_eips.push(p.public_ip_address);
-                }
+            if p.status == "FREE"
+                && crate::hwc::vpc::delete_publicip(&client, &region, &project.id, &p.id)
+                    .await
+                    .is_ok()
+            {
+                stats.deleted_eips.push(p.public_ip_address);
             }
         }
     }

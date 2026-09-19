@@ -1,5 +1,6 @@
 //! IAM: resolve the region-scoped project_id (and domain_id) from AK/SK. Notes §1.
 use crate::hwc::client::SignedClient;
+use crate::hwc::endpoints::{Service, endpoint_url};
 use serde::Deserialize;
 
 #[derive(Debug, Clone)]
@@ -22,7 +23,10 @@ pub struct Project {
 }
 
 pub(crate) fn projects_url(region: &str) -> String {
-    format!("https://iam.{region}.myhuaweicloud.com/v3/projects?name={region}")
+    format!(
+        "{}/v3/projects?name={region}",
+        endpoint_url(Service::Iam, region)
+    )
 }
 
 pub(crate) fn pick_project(resp: ProjectsResp, region: &str) -> anyhow::Result<ProjectRef> {

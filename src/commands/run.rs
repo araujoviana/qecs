@@ -644,20 +644,7 @@ pub async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Resul
 
             let job_id = ecs::delete_servers(&client, &region, &project.id, &[server_id]).await?;
 
-            if let Ok(store) = StateStore::open() {
-                if let Ok(Some(r)) = store.get(name) {
-                    if let Some(ip) = &r.eip {
-                        let _ = keys::remove_known_host(ip);
-                    }
-                    if let Some(ip) = &r.private_ip {
-                        let _ = keys::remove_known_host(ip);
-                    }
-                }
-                let _ = store.remove(name);
-                let _ = store.remove(server_id);
-            }
-
-            let _ = jobs::poll_job(
+            let poll_res = jobs::poll_job(
                 &client,
                 Service::Ecs,
                 &region,
@@ -668,7 +655,37 @@ pub async fn destroy_vm(ctx: &Ctx, server_id: &str, name: &str) -> anyhow::Resul
             )
             .await;
 
-            anyhow::Ok(())
+            let deletion_confirmed = match &poll_res {
+                Ok(_) => true,
+                Err(_) => {
+                    if let Ok(servers) = ecs::list_servers(&client, &region, &project.id).await {
+                        !servers.iter().any(|s| s.id == server_id)
+                    } else {
+                        false
+                    }
+                }
+            };
+
+            if deletion_confirmed {
+                if let Ok(store) = StateStore::open() {
+                    if let Ok(Some(r)) = store.get(name) {
+                        if let Some(ip) = &r.eip {
+                            let _ = keys::remove_known_host(ip);
+                        }
+                        if let Some(ip) = &r.private_ip {
+                            let _ = keys::remove_known_host(ip);
+                        }
+                    }
+                    let _ = store.remove(name);
+                    let _ = store.remove(server_id);
+                }
+                anyhow::Ok(())
+            } else {
+                let err = poll_res
+                    .err()
+                    .unwrap_or_else(|| anyhow::anyhow!("failed to confirm VM deletion in cloud"));
+                Err(err)
+            }
         })
         .await
 }

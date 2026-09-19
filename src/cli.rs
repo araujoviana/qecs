@@ -57,7 +57,7 @@ pub enum Commands {
     /// Open a shell on a VM.
     Shell(ShellArgs),
     /// List tracked VMs.
-    Ls,
+    Ls(LsArgs),
     /// Show everything about one VM.
     Info(InfoArgs),
     /// Tail cloud-init or job logs.
@@ -69,7 +69,7 @@ pub enum Commands {
     /// Delete a VM (or all of them) (alias for kill).
     Down(KillArgs),
     /// Reconcile local state with the cloud; remove orphans.
-    Gc,
+    Gc(GcArgs),
     /// Write config and validate credentials.
     Setup,
     /// Show presets and their resolved flavors.
@@ -181,6 +181,20 @@ pub struct LogsArgs {
 #[derive(Args, Debug, Clone)]
 pub struct WaitArgs {
     pub job: String,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct LsArgs {
+    /// Only list locally tracked VMs without querying the cloud.
+    #[arg(long)]
+    pub local: bool,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct GcArgs {
+    /// Force deletion of untracked active VMs without interactive confirmation.
+    #[arg(short, long)]
+    pub force: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -371,7 +385,22 @@ mod tests {
     fn global_json_flag_is_parsed_after_subcommand() {
         let cli = Cli::try_parse_from(["qecs", "ls", "--json"]).unwrap();
         assert!(cli.global.json);
-        assert!(matches!(cli.command, Commands::Ls));
+        assert!(matches!(cli.command, Commands::Ls(_)));
+    }
+
+    #[test]
+    fn parses_ls_local_and_gc_force_flags() {
+        let cli = Cli::try_parse_from(["qecs", "ls", "--local"]).unwrap();
+        match cli.command {
+            Commands::Ls(a) => assert!(a.local),
+            _ => panic!("expected Ls command"),
+        }
+
+        let cli = Cli::try_parse_from(["qecs", "gc", "--force"]).unwrap();
+        match cli.command {
+            Commands::Gc(a) => assert!(a.force),
+            _ => panic!("expected Gc command"),
+        }
     }
 
     #[test]

@@ -40,7 +40,7 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
         let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
         let pb = crate::ui::spinner(format!("Deleting {} VM(s)...", id_refs.len()));
         let job_id = ecs::delete_servers(&client, &region, &project.id, &id_refs).await?;
-        let _ = jobs::poll_job(
+        let poll_res = jobs::poll_job(
             &client,
             Service::Ecs,
             &region,
@@ -52,25 +52,53 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
         .await;
         pb.finish_and_clear();
 
-        for r in &records {
-            let _ = store.remove(&r.name);
-            let _ = store.remove(&r.id);
-            if let Some(ip) = &r.eip {
-                let _ = crate::keys::remove_known_host(ip);
+        let remaining = ecs::list_servers(&client, &region, &project.id)
+            .await
+            .unwrap_or_default();
+        let mut confirmed_deleted = 0;
+        for id in &ids {
+            if !remaining.iter().any(|s| &s.id == id) {
+                confirmed_deleted += 1;
+                let _ = store.remove(id);
+                if let Ok(Some(r)) = store.get(id) {
+                    let _ = store.remove(&r.name);
+                    if let Some(ip) = &r.eip {
+                        let _ = crate::keys::remove_known_host(ip);
+                    }
+                    if let Some(ip) = &r.private_ip {
+                        let _ = crate::keys::remove_known_host(ip);
+                    }
+                }
             }
-            if let Some(ip) = &r.private_ip {
-                let _ = crate::keys::remove_known_host(ip);
+        }
+        for r in &records {
+            if !remaining.iter().any(|s| s.id == r.id) {
+                let _ = store.remove(&r.name);
+                let _ = store.remove(&r.id);
             }
         }
         for s in &cloud_servers {
-            let _ = store.remove(&s.name);
-            let _ = store.remove(&s.id);
+            if !remaining.iter().any(|srv| srv.id == s.id) {
+                let _ = store.remove(&s.name);
+                let _ = store.remove(&s.id);
+            }
         }
-        println!(
-            "{}",
-            format!("✓ Killed {} VM(s).", id_refs.len()).green().bold()
-        );
-        return Ok(());
+
+        if confirmed_deleted == ids.len() {
+            println!(
+                "{}",
+                format!("✓ Killed {} VM(s).", id_refs.len()).green().bold()
+            );
+            return Ok(());
+        } else if let Err(e) = poll_res {
+            return Err(e);
+        } else {
+            anyhow::bail!(
+                "only {} of {} VMs confirmed deleted",
+                confirmed_deleted,
+                ids.len()
+            );
+        }
     }
 
     let (server_id, vm_name) =
@@ -78,7 +106,7 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
 
     let pb = crate::ui::spinner(format!("Deleting VM `{vm_name}`..."));
     let job_id = ecs::delete_servers(&client, &region, &project.id, &[&server_id]).await?;
-    let _ = jobs::poll_job(
+    let poll_res = jobs::poll_job(
         &client,
         Service::Ecs,
         &region,
@@ -88,19 +116,38 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
         ctx.telemetry.as_ref(),
     )
     .await;
-    if let Ok(Some(r)) = store.get(&server_id) {
-        if let Some(ip) = &r.eip {
-            let _ = crate::keys::remove_known_host(ip);
-        }
-        if let Some(ip) = &r.private_ip {
-            let _ = crate::keys::remove_known_host(ip);
-        }
-    }
-    let _ = store.remove(&vm_name);
-    let _ = store.remove(&server_id);
     pb.finish_and_clear();
-    println!("{}", format!("✓ VM `{vm_name}` killed.").green().bold());
-    Ok(())
+
+    let confirmed = match &poll_res {
+        Ok(_) => true,
+        Err(_) => {
+            if let Ok(servers) = ecs::list_servers(&client, &region, &project.id).await {
+                !servers.iter().any(|s| s.id == server_id)
+            } else {
+                false
+            }
+        }
+    };
+
+    if confirmed {
+        if let Ok(Some(r)) = store.get(&server_id) {
+            if let Some(ip) = &r.eip {
+                let _ = crate::keys::remove_known_host(ip);
+            }
+            if let Some(ip) = &r.private_ip {
+                let _ = crate::keys::remove_known_host(ip);
+            }
+        }
+        let _ = store.remove(&vm_name);
+        let _ = store.remove(&server_id);
+        println!("{}", format!("✓ VM `{vm_name}` killed.").green().bold());
+        Ok(())
+    } else {
+        let err = poll_res
+            .err()
+            .unwrap_or_else(|| anyhow::anyhow!("failed to confirm VM deletion in cloud"));
+        Err(err)
+    }
 }
 
 pub(crate) async fn resolve_kill_target(

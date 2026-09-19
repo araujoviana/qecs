@@ -1,6 +1,6 @@
 //! Poll HWC async jobs (Pattern A: create/delete ECS return a `job_id`) to completion.
 use crate::hwc::client::SignedClient;
-use crate::hwc::endpoints::{Service, endpoint_host};
+use crate::hwc::endpoints::{Service, endpoint_url};
 use crate::hwc::wait::{Poll, PollConfig, poll_until};
 use crate::telemetry::Telemetry;
 use serde::Deserialize;
@@ -63,8 +63,10 @@ pub(crate) struct SubJobEntities {
 /// must be queried on the same service that issued it (ECS create/delete on the
 /// ECS host, IMS image bake on the IMS host).
 pub(crate) fn job_url(service: Service, region: &str, project_id: &str, job_id: &str) -> String {
-    let host = endpoint_host(service, region);
-    format!("https://{host}/v1/{project_id}/jobs/{job_id}")
+    format!(
+        "{}/v1/{project_id}/jobs/{job_id}",
+        endpoint_url(service, region)
+    )
 }
 
 /// Pure: map a parsed job body to Ready/Pending. Ready carries a `Result` so a

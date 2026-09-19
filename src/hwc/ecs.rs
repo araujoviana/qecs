@@ -1,7 +1,7 @@
 //! Elastic Cloud Server - server lifecycle models plus create + dry-run, and the
 //! get / list / wait / delete / VNC-console read calls with their address helpers.
 use crate::hwc::client::SignedClient;
-use crate::hwc::endpoints::{Service, endpoint_host};
+use crate::hwc::endpoints::{Service, endpoint_url};
 use crate::hwc::wait::{Poll, PollConfig, poll_until};
 use crate::telemetry::Telemetry;
 use anyhow::Context;
@@ -96,10 +96,7 @@ pub fn parse_addresses(v: &Value) -> (Option<String>, Option<String>, Option<Str
 /// `cloudservers` call hangs off (mirrors `vpc::vpc_base`). `jobs::job_url` builds
 /// the same `/v1/{project}` prefix independently for the jobs endpoint.
 pub(crate) fn ecs_base(region: &str, project_id: &str) -> String {
-    format!(
-        "https://{}/v1/{project_id}",
-        endpoint_host(Service::Ecs, region)
-    )
+    format!("{}/v1/{project_id}", endpoint_url(Service::Ecs, region))
 }
 
 /// Borrowed inputs for one pay-per-use ECS create (notes section 6). Branch 2b

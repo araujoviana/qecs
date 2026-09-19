@@ -16,6 +16,8 @@ fn client() -> SignedClient {
     )
 }
 
+static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Debug, Deserialize)]
 struct Flavors {
     flavors: Vec<Flavor>,
@@ -300,6 +302,7 @@ async fn ims_create_image_and_list_private_deserializes() {
 
 #[tokio::test]
 async fn telemetry_records_one_hwc_call_per_request() {
+    let _guard = TEST_LOCK.lock().await;
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v1/test"))
@@ -347,6 +350,7 @@ async fn telemetry_records_one_hwc_call_per_request() {
 
 #[tokio::test]
 async fn telemetry_hwc_call_on_transport_error() {
+    let _guard = TEST_LOCK.lock().await;
     let tmp = tempfile::tempdir().unwrap();
     let tel = {
         unsafe {
@@ -379,4 +383,517 @@ async fn telemetry_hwc_call_on_transport_error() {
     assert_eq!(hwc_line["method"], "GET");
     assert_eq!(hwc_line["status"], 0);
     assert!(hwc_line["total_ms"].as_u64().is_some());
+}
+
+fn integration_ctx() -> qecs::ctx::Ctx {
+    qecs::ctx::Ctx {
+        config: qecs::config::Config::default(),
+        creds: Credentials {
+            ak: "TESTAK".into(),
+            sk: "TESTSK".into(),
+            security_token: None,
+        },
+        http: reqwest::Client::new(),
+        global: qecs::cli::GlobalArgs {
+            region: Some("ap-southeast-3".into()),
+            ..Default::default()
+        },
+        telemetry: None,
+    }
+}
+
+fn sample_record(id: &str, name: &str, eip: Option<&str>) -> qecs::state::VmRecord {
+    qecs::state::VmRecord {
+        id: id.to_string(),
+        name: name.to_string(),
+        preset: "gpu".into(),
+        flavor: "pi2.4xlarge.4".into(),
+        region: "ap-southeast-3".into(),
+        az: "ap-southeast-3a".into(),
+        eip: eip.map(str::to_string),
+        private_ip: Some("192.168.0.10".into()),
+        created_at: "2026-09-18T00:00:00Z".into(),
+        ttl_secs: 7200,
+        connect_port: None,
+        job: None,
+        tags: vec![],
+    }
+}
+
+async fn mock_iam_project(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/v3/projects"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "projects": [
+                {
+                    "id": "proj-42",
+                    "name": "ap-southeast-3",
+                    "domain_id": "dom-1"
+                }
+            ]
+        })))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn test_gc_removes_stale_local_record_when_server_absent_from_cloud() {
+    let _guard = TEST_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("qecs/vms.json");
+    let store = qecs::state::StateStore::at(store_path);
+    store
+        .upsert(sample_record("id-stale", "qecs-stale", Some("1.2.3.4")))
+        .unwrap();
+
+    let server = MockServer::start().await;
+    unsafe {
+        std::env::set_var("QECS_TEST_ENDPOINT", server.uri());
+        std::env::set_var("XDG_STATE_HOME", tmp.path());
+    }
+
+    mock_iam_project(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/cloudservers/detail"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 0,
+            "servers": []
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/publicips"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "publicips": []
+        })))
+        .mount(&server)
+        .await;
+
+    let ctx = integration_ctx();
+    let stats = qecs::lifecycle::reconcile_and_purge(&ctx, false)
+        .await
+        .unwrap();
+
+    assert_eq!(stats.removed_from_state, vec!["qecs-stale"]);
+    assert!(store.get("id-stale").unwrap().is_none());
+    assert!(store.get("qecs-stale").unwrap().is_none());
+
+    unsafe {
+        std::env::remove_var("QECS_TEST_ENDPOINT");
+        std::env::remove_var("XDG_STATE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn test_gc_purges_shutoff_server() {
+    let _guard = TEST_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("qecs/vms.json");
+    let store = qecs::state::StateStore::at(store_path);
+    store
+        .upsert(sample_record("id-dead", "qecs-dead", None))
+        .unwrap();
+
+    let server = MockServer::start().await;
+    unsafe {
+        std::env::set_var("QECS_TEST_ENDPOINT", server.uri());
+        std::env::set_var("XDG_STATE_HOME", tmp.path());
+    }
+
+    mock_iam_project(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/cloudservers/detail"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1,
+            "servers": [{
+                "id": "id-dead",
+                "name": "qecs-dead",
+                "status": "SHUTOFF",
+                "OS-EXT-AZ:availability_zone": "ap-southeast-3a",
+                "OS-EXT-STS:power_state": 4,
+                "flavor": { "id": "s7n.2xlarge.2" },
+                "tags": ["managed-by=qecs"],
+                "addresses": {}
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/proj-42/cloudservers/delete"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "job_id": "job-del-dead"
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/jobs/job-del-dead"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "SUCCESS",
+            "entities": {}
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/publicips"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "publicips": []
+        })))
+        .mount(&server)
+        .await;
+
+    let ctx = integration_ctx();
+    let stats = qecs::lifecycle::reconcile_and_purge(&ctx, false)
+        .await
+        .unwrap();
+
+    assert_eq!(stats.deleted_from_cloud, vec!["id-dead"]);
+    assert!(store.get("id-dead").unwrap().is_none());
+
+    unsafe {
+        std::env::remove_var("QECS_TEST_ENDPOINT");
+        std::env::remove_var("XDG_STATE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn test_gc_purges_untracked_active_server_with_force() {
+    let _guard = TEST_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("qecs/vms.json");
+    let store = qecs::state::StateStore::at(store_path);
+
+    let server = MockServer::start().await;
+    unsafe {
+        std::env::set_var("QECS_TEST_ENDPOINT", server.uri());
+        std::env::set_var("XDG_STATE_HOME", tmp.path());
+    }
+
+    mock_iam_project(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/cloudservers/detail"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1,
+            "servers": [{
+                "id": "id-orphan-act",
+                "name": "qecs-orphan-act",
+                "status": "ACTIVE",
+                "OS-EXT-AZ:availability_zone": "ap-southeast-3a",
+                "OS-EXT-STS:power_state": 1,
+                "flavor": { "id": "s7n.2xlarge.2" },
+                "tags": ["managed-by=qecs"],
+                "addresses": {}
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/proj-42/cloudservers/delete"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "job_id": "job-del-act"
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/jobs/job-del-act"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "SUCCESS",
+            "entities": {}
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/publicips"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "publicips": []
+        })))
+        .mount(&server)
+        .await;
+
+    let ctx = integration_ctx();
+    let stats = qecs::lifecycle::reconcile_and_purge(&ctx, true)
+        .await
+        .unwrap();
+
+    assert_eq!(stats.deleted_from_cloud, vec!["id-orphan-act"]);
+    assert!(stats.untracked_active_kept.is_empty());
+    assert!(store.get("id-orphan-act").unwrap().is_none());
+
+    unsafe {
+        std::env::remove_var("QECS_TEST_ENDPOINT");
+        std::env::remove_var("XDG_STATE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn test_gc_keeps_untracked_active_server_without_force() {
+    let _guard = TEST_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+
+    let server = MockServer::start().await;
+    unsafe {
+        std::env::set_var("QECS_TEST_ENDPOINT", server.uri());
+        std::env::set_var("XDG_STATE_HOME", tmp.path());
+    }
+
+    mock_iam_project(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/cloudservers/detail"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1,
+            "servers": [{
+                "id": "id-orphan-act",
+                "name": "qecs-orphan-act",
+                "status": "ACTIVE",
+                "OS-EXT-AZ:availability_zone": "ap-southeast-3a",
+                "OS-EXT-STS:power_state": 1,
+                "flavor": { "id": "s7n.2xlarge.2" },
+                "tags": ["managed-by=qecs"],
+                "addresses": {}
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/publicips"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "publicips": []
+        })))
+        .mount(&server)
+        .await;
+
+    let ctx = integration_ctx();
+    let stats = qecs::lifecycle::reconcile_and_purge(&ctx, false)
+        .await
+        .unwrap();
+
+    assert!(stats.deleted_from_cloud.is_empty());
+    assert_eq!(stats.untracked_active_kept, vec!["qecs-orphan-act"]);
+
+    unsafe {
+        std::env::remove_var("QECS_TEST_ENDPOINT");
+        std::env::remove_var("XDG_STATE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn test_gc_purges_untracked_free_eip() {
+    let _guard = TEST_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+
+    let server = MockServer::start().await;
+    unsafe {
+        std::env::set_var("QECS_TEST_ENDPOINT", server.uri());
+        std::env::set_var("XDG_STATE_HOME", tmp.path());
+    }
+
+    mock_iam_project(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/cloudservers/detail"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 0,
+            "servers": []
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/publicips"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "publicips": [{
+                "id": "eip-free-99",
+                "status": "FREE",
+                "public_ip_address": "200.1.2.3"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/v1/proj-42/publicips/eip-free-99"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let ctx = integration_ctx();
+    let stats = qecs::lifecycle::reconcile_and_purge(&ctx, false)
+        .await
+        .unwrap();
+
+    assert_eq!(stats.deleted_eips, vec!["200.1.2.3"]);
+
+    unsafe {
+        std::env::remove_var("QECS_TEST_ENDPOINT");
+        std::env::remove_var("XDG_STATE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn test_destroy_vm_preserves_state_on_async_job_failure() {
+    let _guard = TEST_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("qecs/vms.json");
+    let store = qecs::state::StateStore::at(store_path);
+    store
+        .upsert(sample_record("id-fail", "qecs-fail", None))
+        .unwrap();
+
+    let server = MockServer::start().await;
+    unsafe {
+        std::env::set_var("QECS_TEST_ENDPOINT", server.uri());
+        std::env::set_var("XDG_STATE_HOME", tmp.path());
+    }
+
+    mock_iam_project(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/proj-42/cloudservers/delete"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "job_id": "job-fail-1"
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/jobs/job-fail-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "FAIL",
+            "fail_reason": "resource locked"
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/cloudservers/detail"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1,
+            "servers": [{
+                "id": "id-fail",
+                "name": "qecs-fail",
+                "status": "ACTIVE",
+                "OS-EXT-AZ:availability_zone": "ap-southeast-3a",
+                "OS-EXT-STS:power_state": 1,
+                "flavor": { "id": "s7n.2xlarge.2" },
+                "tags": ["managed-by=qecs"],
+                "addresses": {}
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let ctx = integration_ctx();
+    let res = qecs::commands::run::destroy_vm(&ctx, "id-fail", "qecs-fail").await;
+
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("resource locked"));
+    // State must still be preserved!
+    assert!(store.get("id-fail").unwrap().is_some());
+    assert!(store.get("qecs-fail").unwrap().is_some());
+
+    unsafe {
+        std::env::remove_var("QECS_TEST_ENDPOINT");
+        std::env::remove_var("XDG_STATE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn test_destroy_vm_cleans_state_on_success() {
+    let _guard = TEST_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("qecs/vms.json");
+    let store = qecs::state::StateStore::at(store_path);
+    store
+        .upsert(sample_record("id-succ", "qecs-succ", None))
+        .unwrap();
+
+    let server = MockServer::start().await;
+    unsafe {
+        std::env::set_var("QECS_TEST_ENDPOINT", server.uri());
+        std::env::set_var("XDG_STATE_HOME", tmp.path());
+    }
+
+    mock_iam_project(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/proj-42/cloudservers/delete"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "job_id": "job-succ-1"
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/jobs/job-succ-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "SUCCESS",
+            "entities": {}
+        })))
+        .mount(&server)
+        .await;
+
+    let ctx = integration_ctx();
+    let res = qecs::commands::run::destroy_vm(&ctx, "id-succ", "qecs-succ").await;
+
+    assert!(res.is_ok());
+    assert!(store.get("id-succ").unwrap().is_none());
+    assert!(store.get("qecs-succ").unwrap().is_none());
+
+    unsafe {
+        std::env::remove_var("QECS_TEST_ENDPOINT");
+        std::env::remove_var("XDG_STATE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn test_ls_surfaces_untracked_active_orphan() {
+    let _guard = TEST_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+
+    let server = MockServer::start().await;
+    unsafe {
+        std::env::set_var("QECS_TEST_ENDPOINT", server.uri());
+        std::env::set_var("XDG_STATE_HOME", tmp.path());
+    }
+
+    mock_iam_project(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/v1/proj-42/cloudservers/detail"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1,
+            "servers": [{
+                "id": "id-orphan-ls",
+                "name": "qecs-orphan-ls",
+                "status": "ACTIVE",
+                "OS-EXT-AZ:availability_zone": "ap-southeast-3a",
+                "OS-EXT-STS:power_state": 1,
+                "flavor": { "id": "pi2.4xlarge.4" },
+                "tags": ["managed-by=qecs"],
+                "addresses": {
+                    "vpc-1": [{
+                        "version": "4",
+                        "addr": "1.2.3.4",
+                        "OS-EXT-IPS:type": "floating"
+                    }]
+                }
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let ctx = integration_ctx();
+    let res = qecs::commands::ls::cmd_ls(Some(&ctx), false, false).await;
+    assert!(res.is_ok());
+
+    let json_res = qecs::commands::ls::cmd_ls(Some(&ctx), false, true).await;
+    assert!(json_res.is_ok());
+
+    unsafe {
+        std::env::remove_var("QECS_TEST_ENDPOINT");
+        std::env::remove_var("XDG_STATE_HOME");
+    }
 }

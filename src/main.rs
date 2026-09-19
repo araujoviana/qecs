@@ -78,7 +78,14 @@ async fn run_command(
             let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::up::cmd_up(&ctx, args.clone()).await
         }
-        Commands::Ls => qecs::commands::ls::cmd_ls(cli.global.json).await,
+        Commands::Ls(ref args) => {
+            let ctx = if args.local {
+                None
+            } else {
+                qecs::ctx::Ctx::load(cli, cfg.clone(), tel).ok()
+            };
+            qecs::commands::ls::cmd_ls(ctx.as_ref(), args.local, cli.global.json).await
+        }
         Commands::Info(ref args) => {
             let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::info::cmd_info(&ctx, args.clone()).await
@@ -87,9 +94,9 @@ async fn run_command(
             let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
             qecs::commands::kill::cmd_kill(&ctx, args.clone()).await
         }
-        Commands::Gc => {
+        Commands::Gc(ref args) => {
             let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
-            qecs::commands::gc::cmd_gc(&ctx, cli.global.json).await
+            qecs::commands::gc::cmd_gc(&ctx, args.clone(), cli.global.json).await
         }
         Commands::Run(ref args) => {
             let ctx = qecs::ctx::Ctx::load(cli, cfg.clone(), tel)?;
