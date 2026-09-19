@@ -37,8 +37,9 @@ Project-specific context for `qecs`. Read this before making changes.
 - **Credential resolution** (first hit wins), in `src/creds.rs`: `--ak/--sk` flags;
   `QECS_AK/QECS_SK` (with optional `QECS_SECURITY_TOKEN` / `HWC_SECURITY_TOKEN`);
   `HUAWEICLOUD_SDK_AK/SK`; `HWC_AK/HWC_SK`; config `[credentials]`;
-  `.env`/`.env.<profile>` files (default paths include `~/.config/qecs/.env` and
-  `~/Projetos/python-projs/mcp-hwc/.env`, keys `HWC_AK`/`HWC_SK`/optional `QECS_SECURITY_TOKEN`/`HWC_SECURITY_TOKEN`);
+  `.env`/`.env.<profile>` files (default paths: `~/.config/qecs/.env` and `./.env`,
+  additional paths configurable via top-level `env_files` in `config.toml`; keys
+  `HWC_AK`/`HWC_SK`/optional `QECS_SECURITY_TOKEN`/`HWC_SECURITY_TOKEN`);
   interactive prompt (TTY only, suppressed by `--json`/`--quiet`).
 - **Default region `ap-southeast-3`** (best GPU stock; latency irrelevant for
   upload-once/download-once jobs). Config-overridable; non-GPU work can pin `sa-brazil-1`
