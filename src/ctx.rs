@@ -30,6 +30,9 @@ impl Ctx {
         telemetry.set_meta(|m| m.cred_source = Some(cred_source.label()));
         let http = reqwest::Client::builder()
             .user_agent(concat!("qecs/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(60))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()?;
         Ok(Ctx {
             config,

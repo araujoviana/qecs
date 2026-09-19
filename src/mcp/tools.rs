@@ -85,10 +85,9 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Target VM name or unique prefix"
+                        "description": "Target VM name or unique prefix (optional; defaults to most recent VM)"
                     }
-                },
-                "required": ["name"]
+                }
             }),
         },
         ToolDefinition {
@@ -99,14 +98,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 "properties": {
                     "target": {
                         "type": "string",
-                        "description": "Target VM name"
+                        "description": "Target VM name (optional; defaults to most recent VM)"
                     },
                     "cloud_init": {
                         "type": "boolean",
                         "description": "If true, fetch cloud-init bootstrap logs instead of user job logs"
                     }
-                },
-                "required": ["target"]
+                }
             }),
         },
         ToolDefinition {
@@ -183,10 +181,7 @@ pub async fn execute_tool(ctx: &Ctx, name: &str, args: &serde_json::Value) -> Ca
             Err(e) => CallToolResult::err(format!("failed to list VMs: {e}")),
         },
         "qecs_info" => {
-            let target_name = match args.get("name").and_then(|v| v.as_str()) {
-                Some(n) => n.to_string(),
-                None => return CallToolResult::err("missing required parameter 'name'"),
-            };
+            let target_name = args.get("name").and_then(|v| v.as_str()).map(String::from);
             let info_args = crate::cli::InfoArgs { name: target_name };
             match crate::commands::info::cmd_info(ctx, info_args).await {
                 Ok(()) => CallToolResult::ok("Retrieved VM information successfully."),
@@ -219,10 +214,10 @@ pub async fn execute_tool(ctx: &Ctx, name: &str, args: &serde_json::Value) -> Ca
             }
         }
         "qecs_logs" => {
-            let target = match args.get("target").and_then(|v| v.as_str()) {
-                Some(t) => t.to_string(),
-                None => return CallToolResult::err("missing required parameter 'target'"),
-            };
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let logs_args = crate::cli::LogsArgs {
                 target,
                 follow: false,
@@ -263,6 +258,22 @@ pub async fn execute_tool(ctx: &Ctx, name: &str, args: &serde_json::Value) -> Ca
         }
         "qecs_run" => {
             let path = args.get("path").and_then(|v| v.as_str()).map(PathBuf::from);
+            if let Some(ref p) = path {
+                if let Ok(canon) = p.canonicalize() {
+                    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    if let Ok(cwd_canon) = cwd.canonicalize()
+                        && !canon.starts_with(&cwd_canon)
+                    {
+                        return CallToolResult::err(format!(
+                            "Access denied: path `{}` is outside the authorized workspace `{}`",
+                            p.display(),
+                            cwd_canon.display()
+                        ));
+                    }
+                } else {
+                    return CallToolResult::err(format!("Path `{}` does not exist", p.display()));
+                }
+            }
             let preset = args
                 .get("preset")
                 .and_then(|v| v.as_str())

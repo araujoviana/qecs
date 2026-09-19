@@ -141,14 +141,53 @@ pub fn format_tunnel_banner(
     format!("\n{top}\n{line1}\n{line2}\n{bottom}\n")
 }
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// OpenSSH ControlMaster session manager for multiplexing dynamic port forwards.
 #[derive(Debug, Clone)]
 pub struct ControlMasterSession {
+    inner: Arc<ControlMasterInner>,
+}
+
+#[derive(Debug)]
+pub struct ControlMasterInner {
     pub socket_path: PathBuf,
     pub ip: String,
     pub port: u16,
     pub key_path: PathBuf,
     pub proxy_command: Option<String>,
+    pub closed: AtomicBool,
+}
+
+impl std::ops::Deref for ControlMasterSession {
+    type Target = ControlMasterInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl ControlMasterInner {
+    /// Cleanly terminate the ControlMaster connection and close all forwarded tunnels.
+    pub fn close(&self) {
+        if !self.closed.swap(true, Ordering::SeqCst) && self.socket_path.exists() {
+            let mut cmd = Command::new("ssh");
+            cmd.arg("-S")
+                .arg(&self.socket_path)
+                .arg("-O")
+                .arg("exit")
+                .arg("dummy");
+            let _ = cmd.output();
+            let _ = std::fs::remove_file(&self.socket_path);
+        }
+    }
+}
+
+impl Drop for ControlMasterInner {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 /// Resolve a safe, short, user-isolated UNIX domain socket path for OpenSSH ControlMaster.
@@ -191,11 +230,14 @@ impl ControlMasterSession {
         let socket_path = safe_control_socket_path(vm_name);
 
         Self {
-            socket_path,
-            ip: ip.to_string(),
-            port,
-            key_path: key_path.to_path_buf(),
-            proxy_command: proxy_command.map(String::from),
+            inner: Arc::new(ControlMasterInner {
+                socket_path,
+                ip: ip.to_string(),
+                port,
+                key_path: key_path.to_path_buf(),
+                proxy_command: proxy_command.map(String::from),
+                closed: AtomicBool::new(false),
+            }),
         }
     }
 
@@ -238,16 +280,7 @@ impl ControlMasterSession {
 
     /// Cleanly terminate the ControlMaster connection and close all forwarded tunnels.
     pub fn close(&self) {
-        if self.socket_path.exists() {
-            let mut cmd = Command::new("ssh");
-            cmd.arg("-S")
-                .arg(&self.socket_path)
-                .arg("-O")
-                .arg("exit")
-                .arg("dummy");
-            let _ = cmd.output();
-            let _ = std::fs::remove_file(&self.socket_path);
-        }
+        self.inner.close();
     }
 }
 
@@ -299,12 +332,6 @@ pub fn spawn_port_watcher(session: ControlMasterSession) -> tokio::sync::oneshot
     });
 
     tx
-}
-
-impl Drop for ControlMasterSession {
-    fn drop(&mut self) {
-        self.close();
-    }
 }
 
 #[cfg(test)]
@@ -362,5 +389,32 @@ mod tests {
         assert!(banner.contains("http://localhost:7860"));
         assert!(banner.contains("Gradio"));
         assert!(banner.contains("remote port 7860"));
+    }
+
+    #[test]
+    fn test_control_master_session_clone_drop_preserves_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key_file = tmp.path().join("id_rsa");
+        std::fs::write(&key_file, "key").unwrap();
+
+        let session =
+            ControlMasterSession::new("test-vm-clone-drop", "127.0.0.1", 22, &key_file, None);
+
+        // Create a dummy socket file at socket_path to simulate an established connection
+        std::fs::write(&session.socket_path, "mock-socket").unwrap();
+        assert!(session.socket_path.exists());
+
+        // Clone session and drop the clone
+        {
+            let clone = session.clone();
+            assert!(clone.socket_path.exists());
+        }
+
+        // The socket file MUST still exist because session is still alive!
+        assert!(session.socket_path.exists());
+
+        // Now drop session itself
+        drop(session);
+        // After final drop, socket is cleaned up
     }
 }

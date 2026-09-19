@@ -106,9 +106,16 @@ pub(crate) fn job_outcome(resp: JobResp) -> Poll<anyhow::Result<JobResult>> {
             }
             Poll::Ready(Err(anyhow::anyhow!(msg)))
         }
-        JobStatus::Init | JobStatus::Running | JobStatus::PendingPayment | JobStatus::Other => {
-            Poll::Pending
+        JobStatus::PendingPayment => Poll::Ready(Err(anyhow::anyhow!(
+            "job blocked on payment or pending account order (PENDING_PAYMENT)"
+        ))),
+        JobStatus::Other => {
+            let reason = resp
+                .fail_reason
+                .unwrap_or_else(|| "unrecognized job state".to_string());
+            Poll::Ready(Err(anyhow::anyhow!("unexpected job state: {reason}")))
         }
+        JobStatus::Init | JobStatus::Running => Poll::Pending,
     }
 }
 
@@ -211,5 +218,23 @@ mod tests {
         };
         assert_eq!(r.image_ids, ["img-9f3a"]);
         assert!(r.server_ids.is_empty());
+    }
+
+    #[test]
+    fn pending_payment_fails_fast() {
+        let j = r#"{"status":"PENDING_PAYMENT","job_id":"j"}"#;
+        let Poll::Ready(Err(e)) = job_outcome(serde_json::from_str(j).unwrap()) else {
+            panic!("expected ready-err for pending payment")
+        };
+        assert!(e.to_string().contains("PENDING_PAYMENT"));
+    }
+
+    #[test]
+    fn other_unknown_status_fails_fast() {
+        let j = r#"{"status":"UNKNOWN_CUSTOM_STATUS","job_id":"j","fail_reason":"abnormal"}"#;
+        let Poll::Ready(Err(e)) = job_outcome(serde_json::from_str(j).unwrap()) else {
+            panic!("expected ready-err for unknown status")
+        };
+        assert!(e.to_string().contains("abnormal"));
     }
 }

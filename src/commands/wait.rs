@@ -127,10 +127,20 @@ pub async fn cmd_wait(ctx: &Ctx, args: WaitArgs) -> anyhow::Result<()> {
         let out = connect::build_ssh_command(&ip, port, &paths.private_key, proxy_cmd.as_deref())
             .arg(format!("cat {marker} 2>/dev/null || true"))
             .output();
-        out.ok()
+        let raw = out
+            .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "out".to_string())
+            .unwrap_or_else(|| "out".to_string());
+        if raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/')
+            && !raw.contains("..")
+        {
+            raw
+        } else {
+            "out".to_string()
+        }
     };
 
     // Pull output artifacts

@@ -56,9 +56,20 @@ impl SignedClient {
         url: &str,
         content_type: Option<&str>,
         body: Option<&[u8]>,
-    ) -> HeaderMap {
-        let parsed = reqwest::Url::parse(url).expect("valid url");
-        let host = parsed.host_str().expect("url has host").to_string();
+    ) -> Result<HeaderMap, ApiError> {
+        let parsed = reqwest::Url::parse(url).map_err(|e| ApiError {
+            status: 0,
+            code: None,
+            message: format!("invalid url `{url}`: {e}"),
+        })?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| ApiError {
+                status: 0,
+                code: None,
+                message: format!("url `{url}` has no host"),
+            })?
+            .to_string();
         let sdk_date = chrono::Utc::now().format(sign::DATE_FORMAT).to_string();
         let body = body.unwrap_or(b"");
 
@@ -93,21 +104,53 @@ impl SignedClient {
         let auth = sign::authorization_header(&self.creds.ak, &signed, &sig);
 
         let mut out = HeaderMap::new();
-        out.insert("Host", HeaderValue::from_str(&host).unwrap());
-        out.insert("X-Sdk-Date", HeaderValue::from_str(&sdk_date).unwrap());
+        out.insert(
+            "Host",
+            HeaderValue::from_str(&host).map_err(|e| ApiError {
+                status: 0,
+                code: None,
+                message: format!("invalid Host header value: {e}"),
+            })?,
+        );
+        out.insert(
+            "X-Sdk-Date",
+            HeaderValue::from_str(&sdk_date).map_err(|e| ApiError {
+                status: 0,
+                code: None,
+                message: format!("invalid X-Sdk-Date header value: {e}"),
+            })?,
+        );
         if let Some(ct) = content_type {
-            out.insert("Content-Type", HeaderValue::from_str(ct).unwrap());
+            out.insert(
+                "Content-Type",
+                HeaderValue::from_str(ct).map_err(|e| ApiError {
+                    status: 0,
+                    code: None,
+                    message: format!("invalid Content-Type header value: {e}"),
+                })?,
+            );
         } else if !body.is_empty() {
             out.insert("Content-Type", HeaderValue::from_static("application/json"));
         }
         if let Some(tok) = &self.creds.security_token {
-            out.insert("X-Security-Token", HeaderValue::from_str(tok).unwrap());
+            out.insert(
+                "X-Security-Token",
+                HeaderValue::from_str(tok).map_err(|e| ApiError {
+                    status: 0,
+                    code: None,
+                    message: format!("invalid X-Security-Token header value: {e}"),
+                })?,
+            );
         }
         out.insert(
             HeaderName::from_static("authorization"),
-            HeaderValue::from_str(&auth).unwrap(),
+            HeaderValue::from_str(&auth).map_err(|e| ApiError {
+                status: 0,
+                code: None,
+                message: format!("invalid Authorization header value: {e}"),
+            })?,
         );
-        out
+        Ok(out)
     }
 
     pub(crate) fn signed_headers_for(
@@ -115,7 +158,7 @@ impl SignedClient {
         method: &Method,
         url: &str,
         body: Option<&[u8]>,
-    ) -> HeaderMap {
+    ) -> Result<HeaderMap, ApiError> {
         self.signed_headers_for_content(method, url, None, body)
     }
 
@@ -126,7 +169,7 @@ impl SignedClient {
         content_type: Option<&str>,
         body: Option<&[u8]>,
     ) -> Result<(u16, String), ApiError> {
-        let headers = self.signed_headers_for_content(&method, url, content_type, body);
+        let headers = self.signed_headers_for_content(&method, url, content_type, body)?;
         self.send_with_headers(method, url, headers, body).await
     }
 
@@ -153,11 +196,27 @@ impl SignedClient {
 
         let mut headers = HeaderMap::new();
         for (k, v) in signed {
-            let name = HeaderName::from_bytes(k.as_bytes()).expect("valid header name");
-            headers.insert(name, HeaderValue::from_str(&v).expect("valid header value"));
+            let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| ApiError {
+                status: 0,
+                code: None,
+                message: format!("invalid header name `{k}`: {e}"),
+            })?;
+            let value = HeaderValue::from_str(&v).map_err(|e| ApiError {
+                status: 0,
+                code: None,
+                message: format!("invalid header value for `{k}`: {e}"),
+            })?;
+            headers.insert(name, value);
         }
         if let Some(ct) = content_type {
-            headers.insert("Content-Type", HeaderValue::from_str(ct).unwrap());
+            headers.insert(
+                "Content-Type",
+                HeaderValue::from_str(ct).map_err(|e| ApiError {
+                    status: 0,
+                    code: None,
+                    message: format!("invalid Content-Type header value: {e}"),
+                })?,
+            );
         }
 
         self.send_with_headers(method, url, headers, body).await
@@ -184,63 +243,105 @@ impl SignedClient {
             .unwrap_or("")
             .to_string();
 
-        let mut req = self.http.request(method, url).headers(headers);
-        if let Some(r) = body {
-            req = req.body(r.to_vec());
-        }
-        let send_res = req.send().await;
-        let ttfb = t0.elapsed();
+        let idempotent = is_idempotent(&method);
+        let max_retries = if idempotent { 3 } else { 0 };
+        let mut attempt = 0;
 
-        let resp = match send_res {
-            Ok(r) => r,
-            Err(e) => {
-                let total = t0.elapsed();
-                if let Some(t) = &self.telemetry {
-                    t.record_hwc(HwcCall {
-                        method: method_str,
-                        host,
-                        path,
+        loop {
+            let mut req = self
+                .http
+                .request(method.clone(), url)
+                .headers(headers.clone());
+            if let Some(r) = body {
+                req = req.body(r.to_vec());
+            }
+            let t_req = Instant::now();
+            let send_res = req.send().await;
+            let ttfb = t_req.elapsed();
+
+            match send_res {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let should_retry =
+                        idempotent && (status == 429 || (500..=599).contains(&status));
+                    if should_retry && attempt < max_retries {
+                        attempt += 1;
+                        let nanos = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.subsec_nanos())
+                            .unwrap_or(0);
+                        let jitter = (nanos % 50) as u64;
+                        let backoff_ms = (100 * (1 << attempt)) + jitter;
+                        log::debug!(
+                            "Retrying {method_str} {url} after status {status} (attempt {attempt}/{max_retries}, backoff {backoff_ms}ms)"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        continue;
+                    }
+
+                    let request_id = resp
+                        .headers()
+                        .get("x-request-id")
+                        .or_else(|| resp.headers().get("x-openstack-request-id"))
+                        .and_then(|v| v.to_str().ok())
+                        .map(String::from);
+                    let text = resp.text().await.unwrap_or_default();
+                    let total = t0.elapsed();
+
+                    if let Some(t) = &self.telemetry {
+                        t.record_hwc(HwcCall {
+                            method: method_str,
+                            host,
+                            path,
+                            status,
+                            request_id,
+                            ttfb_ms: ttfb.as_millis() as u64,
+                            total_ms: total.as_millis() as u64,
+                            resp_bytes: text.len() as u64,
+                            phase: current_phase().map(String::from),
+                        });
+                    }
+
+                    return Ok((status, text));
+                }
+                Err(e) => {
+                    if idempotent && attempt < max_retries {
+                        attempt += 1;
+                        let nanos = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.subsec_nanos())
+                            .unwrap_or(0);
+                        let jitter = (nanos % 50) as u64;
+                        let backoff_ms = (100 * (1 << attempt)) + jitter;
+                        log::debug!(
+                            "Retrying {method_str} {url} after network error {e} (attempt {attempt}/{max_retries}, backoff {backoff_ms}ms)"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        continue;
+                    }
+
+                    let total = t0.elapsed();
+                    if let Some(t) = &self.telemetry {
+                        t.record_hwc(HwcCall {
+                            method: method_str,
+                            host,
+                            path,
+                            status: 0,
+                            request_id: None,
+                            ttfb_ms: ttfb.as_millis() as u64,
+                            total_ms: total.as_millis() as u64,
+                            resp_bytes: 0,
+                            phase: current_phase().map(String::from),
+                        });
+                    }
+                    return Err(ApiError {
                         status: 0,
-                        request_id: None,
-                        ttfb_ms: ttfb.as_millis() as u64,
-                        total_ms: total.as_millis() as u64,
-                        resp_bytes: 0,
-                        phase: current_phase().map(String::from),
+                        code: None,
+                        message: e.to_string(),
                     });
                 }
-                return Err(ApiError {
-                    status: 0,
-                    code: None,
-                    message: e.to_string(),
-                });
             }
-        };
-
-        let status = resp.status().as_u16();
-        let request_id = resp
-            .headers()
-            .get("x-request-id")
-            .or_else(|| resp.headers().get("x-openstack-request-id"))
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
-        let text = resp.text().await.unwrap_or_default();
-        let total = t0.elapsed();
-
-        if let Some(t) = &self.telemetry {
-            t.record_hwc(HwcCall {
-                method: method_str,
-                host,
-                path,
-                status,
-                request_id,
-                ttfb_ms: ttfb.as_millis() as u64,
-                total_ms: total.as_millis() as u64,
-                resp_bytes: text.len() as u64,
-                phase: current_phase().map(String::from),
-            });
         }
-
-        Ok((status, text))
     }
 
     pub async fn send_json<T: DeserializeOwned>(
@@ -249,77 +350,18 @@ impl SignedClient {
         url: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<T, ApiError> {
-        let t0 = Instant::now();
-        let method_str = method.to_string();
-        let parsed_url = reqwest::Url::parse(url).ok();
-        let host = parsed_url
-            .as_ref()
-            .and_then(|u| u.host_str())
-            .unwrap_or("")
-            .to_string();
-        let path = parsed_url
-            .as_ref()
-            .map(|u| u.path())
-            .unwrap_or("")
-            .to_string();
-
-        let raw = body.map(|b| serde_json::to_vec(b).unwrap());
-        let headers = self.signed_headers_for(&method, url, raw.as_deref());
-        let mut req = self.http.request(method, url).headers(headers);
-        if let Some(r) = &raw {
-            req = req.body(r.clone());
-        }
-        let send_res = req.send().await;
-        let ttfb = t0.elapsed();
-
-        let resp = match send_res {
-            Ok(r) => r,
-            Err(e) => {
-                let total = t0.elapsed();
-                if let Some(t) = &self.telemetry {
-                    t.record_hwc(HwcCall {
-                        method: method_str,
-                        host,
-                        path,
-                        status: 0,
-                        request_id: None,
-                        ttfb_ms: ttfb.as_millis() as u64,
-                        total_ms: total.as_millis() as u64,
-                        resp_bytes: 0,
-                        phase: current_phase().map(String::from),
-                    });
-                }
-                return Err(ApiError {
-                    status: 0,
-                    code: None,
-                    message: e.to_string(),
-                });
-            }
+        let raw = match body {
+            Some(b) => Some(serde_json::to_vec(b).map_err(|e| ApiError {
+                status: 0,
+                code: None,
+                message: format!("serializing request body: {e}"),
+            })?),
+            None => None,
         };
-
-        let status = resp.status().as_u16();
-        let request_id = resp
-            .headers()
-            .get("x-request-id")
-            .or_else(|| resp.headers().get("x-openstack-request-id"))
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
-        let text = resp.text().await.unwrap_or_default();
-        let total = t0.elapsed();
-
-        if let Some(t) = &self.telemetry {
-            t.record_hwc(HwcCall {
-                method: method_str,
-                host,
-                path,
-                status,
-                request_id,
-                ttfb_ms: ttfb.as_millis() as u64,
-                total_ms: total.as_millis() as u64,
-                resp_bytes: text.len() as u64,
-                phase: current_phase().map(String::from),
-            });
-        }
+        let headers = self.signed_headers_for(&method, url, raw.as_deref())?;
+        let (status, text) = self
+            .send_with_headers(method, url, headers, raw.as_deref())
+            .await?;
 
         if (200..300).contains(&status) {
             if text.trim().is_empty() {
@@ -358,6 +400,13 @@ impl SignedClient {
     }
 }
 
+pub(crate) fn is_idempotent(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::GET | Method::HEAD | Method::PUT | Method::DELETE | Method::OPTIONS
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,11 +425,13 @@ mod tests {
 
     #[test]
     fn builds_authorization_and_date_headers() {
-        let h = client(None).signed_headers_for(
-            &Method::GET,
-            "https://ecs.ap-southeast-3.myhuaweicloud.com/v1/proj/cloudservers/flavors",
-            None,
-        );
+        let h = client(None)
+            .signed_headers_for(
+                &Method::GET,
+                "https://ecs.ap-southeast-3.myhuaweicloud.com/v1/proj/cloudservers/flavors",
+                None,
+            )
+            .unwrap();
         assert!(h.get("X-Sdk-Date").is_some());
         let auth = h.get("Authorization").unwrap().to_str().unwrap();
         assert!(auth.starts_with("SDK-HMAC-SHA256 Access=AK, SignedHeaders="));
@@ -390,11 +441,9 @@ mod tests {
 
     #[test]
     fn security_token_is_signed_when_present() {
-        let h = client(Some("TOK")).signed_headers_for(
-            &Method::GET,
-            "https://ecs.x.myhuaweicloud.com/a/",
-            None,
-        );
+        let h = client(Some("TOK"))
+            .signed_headers_for(&Method::GET, "https://ecs.x.myhuaweicloud.com/a/", None)
+            .unwrap();
         assert_eq!(h.get("X-Security-Token").unwrap(), "TOK");
         assert!(
             h.get("Authorization")
@@ -403,5 +452,24 @@ mod tests {
                 .unwrap()
                 .contains("x-security-token")
         );
+    }
+
+    #[test]
+    fn invalid_url_returns_error_not_panic() {
+        let c = client(None);
+        let res = c.signed_headers_for(&Method::GET, "not-a-valid-url", None);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().message.contains("invalid url"));
+    }
+
+    #[test]
+    fn test_is_idempotent_classification() {
+        assert!(is_idempotent(&Method::GET));
+        assert!(is_idempotent(&Method::HEAD));
+        assert!(is_idempotent(&Method::PUT));
+        assert!(is_idempotent(&Method::DELETE));
+        assert!(is_idempotent(&Method::OPTIONS));
+        assert!(!is_idempotent(&Method::POST));
+        assert!(!is_idempotent(&Method::PATCH));
     }
 }

@@ -49,9 +49,19 @@ pub async fn cmd_cache(ctx: &Ctx, args: CacheArgs) -> anyhow::Result<()> {
 
     match args.action {
         CacheAction::Ls => {
-            let pb = crate::ui::spinner(format!("Querying OBS cache in bucket `{bucket}`..."));
-            let objects = obs::list_cache_objects(&client, &region, &bucket).await?;
-            pb.finish_and_clear();
+            let objects = if ctx.global.json {
+                obs::list_cache_objects(&client, &region, &bucket).await?
+            } else {
+                let pb = crate::ui::spinner(format!("Querying OBS cache in bucket `{bucket}`..."));
+                let res = obs::list_cache_objects(&client, &region, &bucket).await;
+                pb.finish_and_clear();
+                res?
+            };
+
+            if ctx.global.json {
+                println!("{}", serde_json::to_string_pretty(&objects)?);
+                return Ok(());
+            }
 
             if objects.is_empty() {
                 println!(
@@ -84,6 +94,18 @@ pub async fn cmd_cache(ctx: &Ctx, args: CacheArgs) -> anyhow::Result<()> {
             );
         }
         CacheAction::Clean { force } => {
+            if ctx.global.json {
+                let count = obs::delete_all_cache_objects(&client, &region, &bucket).await?;
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "bucket": bucket,
+                        "deleted": count,
+                    })
+                );
+                return Ok(());
+            }
+
             if !force {
                 eprintln!(
                     "{}",
@@ -100,6 +122,18 @@ pub async fn cmd_cache(ctx: &Ctx, args: CacheArgs) -> anyhow::Result<()> {
             );
         }
         CacheAction::Destroy { force } => {
+            if ctx.global.json {
+                obs::destroy_cache_bucket(&client, &region, &bucket).await?;
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "bucket": bucket,
+                        "status": "destroyed",
+                    })
+                );
+                return Ok(());
+            }
+
             if !force {
                 eprintln!(
                     "{}",

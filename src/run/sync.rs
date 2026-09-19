@@ -114,26 +114,33 @@ pub fn pack_directory_stream<W: Write>(root: &Path, writer: W) -> anyhow::Result
                 continue;
             }
 
-            match entry.file_type() {
-                Some(ft) if ft.is_file() => {}
-                _ => continue,
-            }
-
             let path = entry.path();
             let rel_path = match path.strip_prefix(root) {
                 Ok(p) => p,
                 Err(_) => continue,
             };
 
+            // Skip root itself
+            if rel_path.as_os_str().is_empty() {
+                continue;
+            }
+
             let file_name = entry.file_name().to_string_lossy();
             if is_sensitive_filename(&file_name) {
                 continue;
             }
 
-            let mut file =
-                File::open(path).with_context(|| format!("opening file `{}`", path.display()))?;
-            tar.append_file(rel_path, &mut file)
-                .with_context(|| format!("adding `{}` to tar", rel_path.display()))?;
+            if let Some(ft) = entry.file_type() {
+                if ft.is_file() {
+                    let mut file = File::open(path)
+                        .with_context(|| format!("opening file `{}`", path.display()))?;
+                    tar.append_file(rel_path, &mut file)
+                        .with_context(|| format!("adding `{}` to tar", rel_path.display()))?;
+                } else if ft.is_dir() {
+                    tar.append_dir(rel_path, path)
+                        .with_context(|| format!("adding dir `{}` to tar", rel_path.display()))?;
+                }
+            }
         }
 
         tar.finish().context("finishing tarball stream")?;
@@ -250,6 +257,7 @@ pub fn upload_workdir(
 /// Build shell test to verify remote output artifacts exist.
 /// Supports a single directory, single file, or comma-separated targets/globs.
 pub fn build_remote_artifact_check_cmd(remote_dir: &str, target_spec: &str) -> String {
+    let q_remote = format!("'{}'", remote_dir.replace('\'', "'\\''"));
     let targets: Vec<&str> = target_spec
         .split(',')
         .map(str::trim)
@@ -257,18 +265,19 @@ pub fn build_remote_artifact_check_cmd(remote_dir: &str, target_spec: &str) -> S
         .collect();
 
     if targets.len() == 1 && !targets[0].contains('*') && !targets[0].contains('?') {
-        let t = targets[0];
+        let t = targets[0].replace('\'', "'\\''");
+        let remote_clean = remote_dir.replace('\'', "'\\''");
         format!(
-            "[ -d '{remote_dir}/{t}' ] && [ \"$(ls -A '{remote_dir}/{t}' 2>/dev/null)\" ] || [ -f '{remote_dir}/{t}' ]"
+            "[ -d '{remote_clean}/{t}' ] && [ \"$(ls -A '{remote_clean}/{t}' 2>/dev/null)\" ] || [ -f '{remote_clean}/{t}' ]"
         )
     } else {
         let targets_joined = targets
             .iter()
-            .map(|t| format!("'{t}'"))
+            .map(|t| format!("'{}'", t.replace('\'', "'\\''")))
             .collect::<Vec<_>>()
             .join(" ");
         format!(
-            "cd '{remote_dir}' && {{ for t in {targets_joined}; do for f in $t; do if [ -e \"$f\" ]; then exit 0; fi; done; done; exit 1; }}"
+            "cd {q_remote} && {{ for t in {targets_joined}; do for f in $t; do if [ -e \"$f\" ]; then exit 0; fi; done; done; exit 1; }}"
         )
     }
 }
@@ -276,6 +285,7 @@ pub fn build_remote_artifact_check_cmd(remote_dir: &str, target_spec: &str) -> S
 /// Build shell command to stream matching remote output artifacts as a gzipped tarball.
 /// Supports a single directory (extracts its contents), single file, or comma-separated targets/globs.
 pub fn build_remote_artifact_stream_cmd(remote_dir: &str, target_spec: &str) -> String {
+    let q_remote = format!("'{}'", remote_dir.replace('\'', "'\\''"));
     let targets: Vec<&str> = target_spec
         .split(',')
         .map(str::trim)
@@ -283,18 +293,19 @@ pub fn build_remote_artifact_stream_cmd(remote_dir: &str, target_spec: &str) -> 
         .collect();
 
     if targets.len() == 1 && !targets[0].contains('*') && !targets[0].contains('?') {
-        let t = targets[0];
+        let t = targets[0].replace('\'', "'\\''");
+        let remote_clean = remote_dir.replace('\'', "'\\''");
         format!(
-            "cd '{remote_dir}' && if [ -d '{t}' ]; then tar -czf - -C '{remote_dir}/{t}' .; else tar -czf - -C '{remote_dir}' '{t}'; fi"
+            "cd {q_remote} && if [ -d '{t}' ]; then tar -czf - -C '{remote_clean}/{t}' .; else tar -czf - -C {q_remote} '{t}'; fi"
         )
     } else {
         let targets_joined = targets
             .iter()
-            .map(|t| format!("'{t}'"))
+            .map(|t| format!("'{}'", t.replace('\'', "'\\''")))
             .collect::<Vec<_>>()
             .join(" ");
         format!(
-            "cd '{remote_dir}' && shopt -s nullglob && FILES=() && for t in {targets_joined}; do for f in $t; do [ -e \"$f\" ] && FILES+=(\"$f\"); done; done && [ ${{#FILES[@]}} -gt 0 ] && tar -czf - \"${{FILES[@]}}\""
+            "cd {q_remote} && shopt -s nullglob && FILES=() && for t in {targets_joined}; do for f in $t; do [ -e \"$f\" ] && FILES+=(\"$f\"); done; done && [ ${{#FILES[@]}} -gt 0 ] && tar -czf - \"${{FILES[@]}}\""
         )
     }
 }
@@ -400,24 +411,18 @@ pub fn download_output_full(
         anyhow::bail!("SSH output download failed with exit status: {status}");
     }
 
-    // Atomic commit to local_out
+    // Merge artifacts into local_out: recursively merge directories and overwrite matching files
     fs::create_dir_all(local_out).context("creating local output directory")?;
     for entry in fs::read_dir(temp_dir.path())? {
         let entry = entry?;
         let dest = local_out.join(entry.file_name());
-        if dest.exists() {
+        if entry.path().is_dir() {
+            copy_recursive(&entry.path(), &dest)?;
+        } else {
             if dest.is_dir() {
                 let _ = fs::remove_dir_all(&dest);
-            } else {
-                let _ = fs::remove_file(&dest);
             }
-        }
-        if fs::rename(entry.path(), &dest).is_err() {
-            if entry.path().is_dir() {
-                copy_recursive(&entry.path(), &dest)?;
-            } else {
-                fs::copy(entry.path(), &dest)?;
-            }
+            fs::copy(entry.path(), &dest)?;
         }
     }
 
@@ -432,6 +437,9 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         if entry.path().is_dir() {
             copy_recursive(&entry.path(), &target)?;
         } else {
+            if target.is_dir() {
+                let _ = fs::remove_dir_all(&target);
+            }
             fs::copy(entry.path(), &target)?;
         }
     }
@@ -565,5 +573,46 @@ mod tests {
         let stream = build_remote_artifact_stream_cmd("/workspace", "models/*.pt,results.json");
         assert!(stream.contains("shopt -s nullglob"));
         assert!(stream.contains("for t in 'models/*.pt' 'results.json'"));
+    }
+
+    #[test]
+    fn packs_empty_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("empty_dir")).unwrap();
+        fs::write(root.join("file.txt"), "hello").unwrap();
+
+        let bytes = pack_directory(root).unwrap();
+        let decoder = decompress_stream(&bytes[..]).unwrap();
+        let mut archive = Archive::new(decoder);
+        let paths: Vec<PathBuf> = archive
+            .entries()
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path().unwrap().to_path_buf()))
+            .collect();
+
+        assert!(paths.iter().any(|p| p == Path::new("empty_dir")));
+        assert!(paths.iter().any(|p| p == Path::new("file.txt")));
+    }
+
+    #[test]
+    fn copy_recursive_merges_without_wiping() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dst_dir = tempfile::tempdir().unwrap();
+
+        // Create pre-existing file in dst/sub
+        fs::create_dir_all(dst_dir.path().join("sub")).unwrap();
+        fs::write(dst_dir.path().join("sub").join("old.txt"), "keep me").unwrap();
+
+        // Create new file in src/sub
+        fs::create_dir_all(src_dir.path().join("sub")).unwrap();
+        fs::write(src_dir.path().join("sub").join("new.txt"), "new content").unwrap();
+
+        copy_recursive(src_dir.path(), dst_dir.path()).unwrap();
+
+        // Both old and new files must exist in dst
+        assert!(dst_dir.path().join("sub").join("old.txt").exists());
+        assert!(dst_dir.path().join("sub").join("new.txt").exists());
     }
 }

@@ -34,8 +34,8 @@ struct ImageRow {
 pub async fn cmd_image(ctx: &Ctx, args: ImageArgs, json: bool) -> anyhow::Result<()> {
     match args.action {
         ImageAction::Ls => cmd_image_ls(ctx, json).await,
-        ImageAction::Build(b) => cmd_image_build(ctx, b).await,
-        ImageAction::Delete(d) => cmd_image_delete(ctx, d).await,
+        ImageAction::Build(b) => cmd_image_build(ctx, b, json).await,
+        ImageAction::Delete(d) => cmd_image_delete(ctx, d, json).await,
     }
 }
 
@@ -73,9 +73,21 @@ async fn cmd_image_ls(ctx: &Ctx, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_image_delete(ctx: &Ctx, args: ImageDeleteArgs) -> anyhow::Result<()> {
+async fn cmd_image_delete(ctx: &Ctx, args: ImageDeleteArgs, json: bool) -> anyhow::Result<()> {
     let client = ctx.signed();
     let region = ctx.region();
+
+    if json {
+        images::delete_image(&client, &region, &args.id).await?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "id": args.id,
+                "status": "deleted"
+            })
+        );
+        return Ok(());
+    }
 
     let pb = crate::ui::spinner(format!("Deleting private image `{}`...", args.id));
     images::delete_image(&client, &region, &args.id).await?;
@@ -88,7 +100,7 @@ async fn cmd_image_delete(ctx: &Ctx, args: ImageDeleteArgs) -> anyhow::Result<()
     Ok(())
 }
 
-async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs) -> anyhow::Result<()> {
+async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs, json: bool) -> anyhow::Result<()> {
     let client = ctx.signed();
     let region = ctx.region();
     let (paths, _pub_key) = keys::ensure_keypair(None)?;
@@ -97,12 +109,14 @@ async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs) -> anyhow::Result<()> 
         .name
         .unwrap_or_else(|| format!("qecs-gpu-{}", Utc::now().format("%Y%m%d-%H%M")));
 
-    println!(
-        "{}",
-        format!("▶ Building pre-baked GPU image `{image_name}` in `{region}`...")
-            .cyan()
-            .bold()
-    );
+    if !json {
+        println!(
+            "{}",
+            format!("▶ Building pre-baked GPU image `{image_name}` in `{region}`...")
+                .cyan()
+                .bold()
+        );
+    }
 
     // 1. Provision ephemeral GPU builder instance (force fresh gold image)
     let builder_name = generate_vm_name("qecs-builder-{shortid}", "gpu");
@@ -133,7 +147,7 @@ async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs) -> anyhow::Result<()> 
         vm.name
     ));
     let relay = crate::connect::Relay::from_config(ctx.config.relay.as_ref())?;
-    let port = crate::connect::resolve_connection_port_with_relay(&ip, None, Some(&relay)).await?;
+    let port = crate::connect::wait_for_ssh_ready(&ip, Duration::from_secs(300), &relay).await?;
     pb.finish_and_clear();
 
     let proxy_cmd = relay.proxy_command(&ip, port);
@@ -149,10 +163,12 @@ async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs) -> anyhow::Result<()> 
     )
     .await?;
     pb.finish_and_clear();
-    println!(
-        "{}",
-        "✓ NVIDIA drivers and container toolkit installed successfully.".green()
-    );
+    if !json {
+        println!(
+            "{}",
+            "✓ NVIDIA drivers and container toolkit installed successfully.".green()
+        );
+    }
 
     // 4. Trigger IMS image creation
     let pb = crate::ui::spinner(format!(
@@ -199,16 +215,6 @@ async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs) -> anyhow::Result<()> 
         .cloned()
         .unwrap_or_else(|| "available".into());
 
-    println!(
-        "{}",
-        format!("✓ Pre-baked image `{image_name}` (ID: {created_image_id}) is ACTIVE.")
-            .green()
-            .bold()
-    );
-    println!(
-        "  Subsequent `qecs run` and `qecs up` with GPU presets will use this image for ~30s cold starts."
-    );
-
     // 5. Clean up ephemeral builder VM unless --keep is passed
     if !args.keep {
         let pb = crate::ui::spinner(format!(
@@ -217,11 +223,13 @@ async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs) -> anyhow::Result<()> 
         ));
         crate::commands::run::destroy_vm(ctx, &vm.id, &vm.name).await?;
         pb.finish_and_clear();
-        println!(
-            "{}",
-            format!("✓ Destroyed builder VM `{}`.", vm.name).green()
-        );
-    } else {
+        if !json {
+            println!(
+                "{}",
+                format!("✓ Destroyed builder VM `{}`.", vm.name).green()
+            );
+        }
+    } else if !json {
         println!(
             "{}",
             format!(
@@ -229,6 +237,28 @@ async fn cmd_image_build(ctx: &Ctx, args: ImageBuildArgs) -> anyhow::Result<()> 
                 vm.name
             )
             .dimmed()
+        );
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "name": image_name,
+                "id": created_image_id,
+                "builder_vm": vm.name,
+                "status": "ACTIVE",
+            })
+        );
+    } else {
+        println!(
+            "{}",
+            format!("✓ Pre-baked image `{image_name}` (ID: {created_image_id}) is ACTIVE.")
+                .green()
+                .bold()
+        );
+        println!(
+            "  Subsequent `qecs run` and `qecs up` with GPU presets will use this image for ~30s cold starts."
         );
     }
 

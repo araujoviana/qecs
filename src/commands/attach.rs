@@ -22,7 +22,6 @@ pub async fn cmd_attach(ctx: &Ctx, args: AttachArgs) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("VM `{}` has no IP address", vm.name))?;
 
     let (paths, _pub_key) = keys::ensure_keypair(None)?;
-    let _ = keys::remove_known_host(&ip);
 
     let relay = crate::connect::Relay::from_config(ctx.config.relay.as_ref())?;
     let port = if let Some(p) = vm.connect_port {

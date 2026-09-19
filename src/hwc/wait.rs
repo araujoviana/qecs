@@ -40,6 +40,9 @@ where
     let start = Instant::now();
     let mut wait = cfg.interval;
     let mut iterations = 0u32;
+    let mut consecutive_errors = 0u32;
+    const MAX_CONSECUTIVE_ERRORS: u32 = 3;
+
     loop {
         iterations = iterations.saturating_add(1);
         let res = probe().await;
@@ -56,18 +59,26 @@ where
                 }
                 return Ok(v);
             }
-            Ok(Poll::Pending) => {}
+            Ok(Poll::Pending) => {
+                consecutive_errors = 0;
+            }
             Err(e) => {
-                if let Some(t) = tel {
-                    t.record_poll(PollEvent {
-                        label: what.into(),
-                        iterations,
-                        total_ms: start.elapsed().as_millis() as u64,
-                        final_interval_ms: wait.as_millis() as u64,
-                        outcome: "error",
-                    });
+                consecutive_errors = consecutive_errors.saturating_add(1);
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS || start.elapsed() >= cfg.timeout {
+                    if let Some(t) = tel {
+                        t.record_poll(PollEvent {
+                            label: what.into(),
+                            iterations,
+                            total_ms: start.elapsed().as_millis() as u64,
+                            final_interval_ms: wait.as_millis() as u64,
+                            outcome: "error",
+                        });
+                    }
+                    return Err(e);
                 }
-                return Err(e);
+                log::debug!(
+                    "Transient probe error for `{what}` ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}"
+                );
             }
         }
         if start.elapsed() >= cfg.timeout {
@@ -190,7 +201,11 @@ mod tests {
             (t, p)
         };
 
-        let cfg = PollConfig::default();
+        let cfg = PollConfig {
+            interval: Duration::from_millis(1),
+            max_interval: Duration::from_millis(2),
+            timeout: Duration::from_secs(1),
+        };
         let _ = poll_until::<(), _, _>(
             &cfg,
             "err-probe",
@@ -211,7 +226,7 @@ mod tests {
 
         assert_eq!(poll_line["label"], "err-probe");
         assert_eq!(poll_line["outcome"], "error");
-        assert_eq!(poll_line["iterations"], 1);
+        assert_eq!(poll_line["iterations"], 3);
     }
 
     #[tokio::test]
@@ -260,5 +275,31 @@ mod tests {
         assert_eq!(poll_line["label"], "wait-active x");
         assert_eq!(poll_line["iterations"], 3);
         assert_eq!(poll_line["outcome"], "ready");
+    }
+
+    #[tokio::test]
+    async fn tolerates_transient_probe_errors() {
+        let n = AtomicU32::new(0);
+        let cfg = PollConfig {
+            interval: Duration::from_millis(1),
+            max_interval: Duration::from_millis(2),
+            timeout: Duration::from_secs(1),
+        };
+        let got: u32 = poll_until(
+            &cfg,
+            "transient-test",
+            || async {
+                let c = n.fetch_add(1, Ordering::SeqCst);
+                match c {
+                    0 => anyhow::bail!("temporary glitch 1"),
+                    1 => anyhow::bail!("temporary glitch 2"),
+                    _ => Ok(Poll::Ready(c)),
+                }
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, 2);
     }
 }

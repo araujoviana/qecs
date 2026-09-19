@@ -12,13 +12,13 @@ pub const JOB_SCRIPT_FILE: &str = "/home/ubuntu/run-job.sh";
 /// Build the remote command that ensures `tmux` is available, creates the session,
 /// and launches the staged job script in the background before attaching.
 pub fn build_tmux_launch_script(session_name: &str, script_content: &str) -> String {
+    let b64_script = crate::cloudinit::base64_encode(script_content.as_bytes());
     format!(
         "command -v tmux >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq tmux)\n\
-         cat << 'EOF' > {script_file}\n{script_content}EOF\n\
+         printf '%s' '{b64_script}' | base64 -d > {script_file}\n\
          chmod +x {script_file}\n\
          tmux kill-session -t '{session}' 2>/dev/null || true\n\
          tmux new-session -d -s '{session}' -x 200 -y 50 'bash {script_file}; echo $? > {exit_file}'\n\
-         tmux set-option -t '{session}' mouse on 2>/dev/null || true\n\
          tmux set-option -t '{session}' status off 2>/dev/null || true",
         script_file = JOB_SCRIPT_FILE,
         exit_file = JOB_EXIT_FILE,

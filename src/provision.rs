@@ -291,7 +291,27 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
         .first()
         .context("create job completed without returning a server_id")?;
 
-    let server = ctx
+    // Record provisional VM in local state store immediately so crash/interruption doesn't leak it
+    let provisional_rec = VmRecord {
+        id: server_id.clone(),
+        name: vm_name.clone(),
+        preset: preset_str.clone(),
+        flavor: resolved.flavor.clone(),
+        region: region.clone(),
+        az: az.clone(),
+        eip: None,
+        private_ip: None,
+        created_at: Utc::now().to_rfc3339(),
+        ttl_secs: ttl_duration.as_secs(),
+        connect_port: Some(22),
+        job: None,
+        tags: vec!["managed-by=qecs".to_string()],
+    };
+    if let Ok(store) = StateStore::open() {
+        let _ = store.upsert(provisional_rec);
+    }
+
+    let server = match ctx
         .telemetry
         .phase_try(
             "wait-active",
@@ -305,7 +325,20 @@ pub async fn provision_vm(ctx: &Ctx, opts: &ProvisionOptions) -> anyhow::Result<
             ),
         )
         .await
-        .context("waiting for server to reach ACTIVE status")?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "Server `{server_id}` failed to become ACTIVE ({e}). Triggering compensation cleanup..."
+            );
+            let _ = ecs::delete_servers(&client, &region, &project.id, &[server_id.as_str()]).await;
+            if let Ok(store) = StateStore::open() {
+                let _ = store.remove(server_id);
+                let _ = store.remove(&vm_name);
+            }
+            return Err(e).context("waiting for server to reach ACTIVE status");
+        }
+    };
 
     let rec = VmRecord {
         id: server.id,

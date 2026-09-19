@@ -7,7 +7,7 @@ use crate::keys;
 
 pub async fn cmd_logs(ctx: &Ctx, args: LogsArgs) -> anyhow::Result<()> {
     let (paths, _pub_key) = keys::ensure_keypair(None)?;
-    let (store, mut vm) = resolve_target_vm(ctx, Some(&args.target)).await?;
+    let (store, mut vm) = resolve_target_vm(ctx, args.target.as_deref()).await?;
 
     let ip = vm
         .eip

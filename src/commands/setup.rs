@@ -12,12 +12,38 @@ pub async fn cmd_setup(ctx: &Ctx) -> anyhow::Result<()> {
 
     // 2. Ensure config file exists
     let cfg_path = config::config_path();
-    if !cfg_path.exists() {
+    let config_created = if !cfg_path.exists() {
         if let Some(parent) = cfg_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let default_toml = toml::to_string_pretty(&Config::default())?;
         std::fs::write(&cfg_path, default_toml)?;
+        true
+    } else {
+        false
+    };
+
+    let region = ctx.region();
+    let client = ctx.signed();
+
+    if ctx.global.json {
+        let project = iam::discover_project(&client, &region).await?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "authenticated",
+                "region": region,
+                "project_id": project.id,
+                "domain_id": project.domain_id,
+                "ssh_key": paths.private_key.display().to_string(),
+                "config_path": cfg_path.display().to_string(),
+                "config_created": config_created,
+            })
+        );
+        return Ok(());
+    }
+
+    if config_created {
         println!(
             "{}",
             format!("✓ Created config file: {}", cfg_path.display()).green()
@@ -27,8 +53,6 @@ pub async fn cmd_setup(ctx: &Ctx) -> anyhow::Result<()> {
     }
 
     // 3. Validate credentials by testing IAM connectivity
-    let region = ctx.region();
-    let client = ctx.signed();
     let pb = crate::ui::spinner(format!("Validating credentials in region `{region}`..."));
     let project = ctx
         .telemetry

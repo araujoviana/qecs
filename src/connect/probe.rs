@@ -67,10 +67,18 @@ pub async fn resolve_connection_port_with_relay(
 
     // 4. Fallback to reverse tunnel / relay if configured. The ProxyCommand handles
     //    reaching the relay; ssh still targets the VM's real sshd on 22.
-    if let Some(r) = relay
-        && !matches!(r, crate::connect::Relay::None)
-    {
-        return Ok(22);
+    if let Some(r) = relay {
+        match r {
+            crate::connect::Relay::Bore { server, port, .. } => {
+                if probe_ssh_port(server, *port, probe_timeout).await {
+                    return Ok(22);
+                }
+            }
+            crate::connect::Relay::Custom { .. } => {
+                return Ok(22);
+            }
+            crate::connect::Relay::None => {}
+        }
     }
 
     anyhow::bail!(
@@ -145,9 +153,18 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_falls_back_to_relay_dialing_the_vm_sshd_port_not_the_relay_port() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let _ = stream.write_all(b"SSH-2.0-OpenSSH_9.6p1 Ubuntu\r\n").await;
+            }
+        });
+
         let relay = crate::connect::Relay::Bore {
-            server: "bore.pub".into(),
-            port: 2200,
+            server: "127.0.0.1".into(),
+            port,
             token: None,
         };
 

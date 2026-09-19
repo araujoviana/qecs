@@ -47,6 +47,10 @@ struct ManifestConfig {
 /// the explicit entrypoint.
 /// If `path` is a directory, the directory is inspected according to the detector ladder.
 pub fn detect_recipe(path: &Path) -> anyhow::Result<RunRecipe> {
+    if !path.exists() {
+        anyhow::bail!("path `{}` does not exist", path.display());
+    }
+
     let (workdir, explicit_entry) = if path.is_file() {
         let parent = path
             .parent()
@@ -102,7 +106,9 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
         };
         return Ok(RunRecipe {
             name: "docker-compose".into(),
-            setup_commands: vec![],
+            setup_commands: vec![
+                "which docker >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq docker.io docker-compose-v2)".into(),
+            ],
             run_command: format!("docker compose -f {file} up --abort-on-container-exit"),
             preset: Preset::Normal,
             workdir: workdir.to_path_buf(),
@@ -110,12 +116,24 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
         });
     }
 
-    if workdir.join("Dockerfile").is_file() {
+    let dockerfile = workdir.join("Dockerfile");
+    if dockerfile.is_file() {
+        let df_content = fs::read_to_string(&dockerfile)
+            .unwrap_or_default()
+            .to_lowercase();
+        let is_gpu = df_content.contains("nvidia")
+            || df_content.contains("cuda")
+            || df_content.contains("pytorch");
+        let preset = if is_gpu { Preset::Gpu } else { Preset::Normal };
+        let gpu_flag = if is_gpu { "--gpus all " } else { "" };
         return Ok(RunRecipe {
             name: "docker".into(),
-            setup_commands: vec!["docker build -t qecs-job .".into()],
-            run_command: "docker run --rm -v $(pwd):/workspace -w /workspace qecs-job".into(),
-            preset: Preset::Normal,
+            setup_commands: vec![
+                "which docker >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq docker.io)".into(),
+                "docker build -t qecs-job .".into(),
+            ],
+            run_command: format!("docker run --rm {gpu_flag}-v $(pwd):/workspace -w /workspace qecs-job"),
+            preset,
             workdir: workdir.to_path_buf(),
             output_dir,
         });
@@ -138,6 +156,7 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
     if pyproject.is_file() {
         let content = fs::read_to_string(&pyproject).unwrap_or_default();
         let entry = resolve_python_entry(workdir, explicit_entry);
+        let quoted_entry = format!("'{}'", entry.replace('\'', "'\\''"));
 
         if workdir.join("uv.lock").is_file() || content.contains("[tool.uv]") {
             let mut setup_commands = Vec::new();
@@ -158,7 +177,7 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
             return Ok(RunRecipe {
                 name: "python-uv".into(),
                 setup_commands,
-                run_command: format!("uv run {entry}"),
+                run_command: format!("uv run {quoted_entry}"),
                 preset: default_preset,
                 workdir: workdir.to_path_buf(),
                 output_dir,
@@ -172,7 +191,34 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
                     "pip install --upgrade poetry".into(),
                     "poetry install".into(),
                 ],
-                run_command: format!("poetry run python {entry}"),
+                run_command: format!("poetry run python {quoted_entry}"),
+                preset: default_preset,
+                workdir: workdir.to_path_buf(),
+                output_dir,
+            });
+        }
+
+        if content.contains("[project]") || content.contains("[build-system]") {
+            let mut setup_commands = Vec::new();
+            let sys_pkgs = scan_required_system_packages(workdir);
+            if !sys_pkgs.is_empty() {
+                setup_commands.push(format!(
+                    "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends {}",
+                    sys_pkgs.join(" ")
+                ));
+            }
+            setup_commands.push(
+                "which uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh"
+                    .into(),
+            );
+            setup_commands.push("export PATH=\"$HOME/.local/bin:$PATH\"".into());
+            setup_commands.push("uv venv .venv".into());
+            setup_commands.push(". .venv/bin/activate && uv pip install -e .".into());
+
+            return Ok(RunRecipe {
+                name: "python-pyproject".into(),
+                setup_commands,
+                run_command: format!(". .venv/bin/activate && python3 {quoted_entry}"),
                 preset: default_preset,
                 workdir: workdir.to_path_buf(),
                 output_dir,
@@ -182,13 +228,14 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
 
     if pipfile.is_file() {
         let entry = resolve_python_entry(workdir, explicit_entry);
+        let quoted_entry = format!("'{}'", entry.replace('\'', "'\\''"));
         return Ok(RunRecipe {
             name: "python-pipenv".into(),
             setup_commands: vec![
                 "pip install --upgrade pipenv".into(),
                 "pipenv install".into(),
             ],
-            run_command: format!("pipenv run python {entry}"),
+            run_command: format!("pipenv run python {quoted_entry}"),
             preset: default_preset,
             workdir: workdir.to_path_buf(),
             output_dir,
@@ -197,13 +244,14 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
 
     if conda_env.is_file() {
         let entry = resolve_python_entry(workdir, explicit_entry);
+        let quoted_entry = format!("'{}'", entry.replace('\'', "'\\''"));
         return Ok(RunRecipe {
             name: "python-conda".into(),
             setup_commands: vec![
                 "which micromamba >/dev/null 2>&1 || (curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj -C /usr/local/bin --strip-components=1 bin/micromamba)".into(),
                 "micromamba create -y -f environment.yml -n qecs-env".into(),
             ],
-            run_command: format!("micromamba run -n qecs-env python {entry}"),
+            run_command: format!("micromamba run -n qecs-env python {quoted_entry}"),
             preset: default_preset,
             workdir: workdir.to_path_buf(),
             output_dir,
@@ -212,6 +260,7 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
 
     if requirements.is_file() {
         let entry = resolve_python_entry(workdir, explicit_entry);
+        let quoted_entry = format!("'{}'", entry.replace('\'', "'\\''"));
         let mut setup_commands = Vec::new();
         let sys_pkgs = scan_required_system_packages(workdir);
         if !sys_pkgs.is_empty() {
@@ -230,7 +279,7 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
         return Ok(RunRecipe {
             name: "python-pip".into(),
             setup_commands,
-            run_command: format!(". .venv/bin/activate && python3 {entry}"),
+            run_command: format!(". .venv/bin/activate && python3 {quoted_entry}"),
             preset: default_preset,
             workdir: workdir.to_path_buf(),
             output_dir,
@@ -239,6 +288,7 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
 
     if has_py_files || explicit_entry.is_some_and(|e| e.ends_with(".py")) {
         let entry = resolve_python_entry(workdir, explicit_entry);
+        let quoted_entry = format!("'{}'", entry.replace('\'', "'\\''"));
         let mut setup_commands = Vec::new();
         let sys_pkgs = scan_required_system_packages(workdir);
         if !sys_pkgs.is_empty() {
@@ -250,7 +300,7 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
         return Ok(RunRecipe {
             name: "python-bare".into(),
             setup_commands,
-            run_command: format!("python3 {entry}"),
+            run_command: format!("python3 {quoted_entry}"),
             preset: default_preset,
             workdir: workdir.to_path_buf(),
             output_dir,
@@ -347,7 +397,7 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
                 "which cmake >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq cmake build-essential)".into(),
                 "cmake -B build && cmake --build build".into(),
             ],
-            run_command: "./build/$(ls -t build/ | head -n 1)".into(),
+            run_command: "ctest --test-dir build --output-on-failure 2>/dev/null || (BIN=$(find build -maxdepth 2 -type f -executable ! -name \"*.sh\" ! -name \"Makefile\" | head -n 1); [ -n \"$BIN\" ] && \"$BIN\")".into(),
             preset: Preset::Normal,
             workdir: workdir.to_path_buf(),
             output_dir,
@@ -454,10 +504,20 @@ fn run_detector_ladder(workdir: &Path, explicit_entry: Option<&str>) -> anyhow::
                 output_dir,
             });
         }
+        let target = if content.lines().any(|l| l.trim_start().starts_with("test:")) {
+            "make test"
+        } else if content
+            .lines()
+            .any(|l| l.trim_start().starts_with("check:"))
+        {
+            "make check"
+        } else {
+            "make"
+        };
         return Ok(RunRecipe {
             name: "make".into(),
-            setup_commands: vec!["make".into()],
-            run_command: "./a.out".into(),
+            setup_commands: vec![],
+            run_command: target.into(),
             preset: Preset::Normal,
             workdir: workdir.to_path_buf(),
             output_dir,
@@ -489,6 +549,16 @@ fn resolve_python_entry(workdir: &Path, explicit: Option<&str>) -> String {
         }
     }
 
+    // Check src/ directory candidates
+    let src_dir = workdir.join("src");
+    if src_dir.is_dir() {
+        for c in candidates {
+            if src_dir.join(c).is_file() {
+                return format!("src/{c}");
+            }
+        }
+    }
+
     // Fallback: find any .py file in directory
     if let Ok(entries) = fs::read_dir(workdir) {
         for entry in entries.flatten() {
@@ -499,6 +569,22 @@ fn resolve_python_entry(workdir: &Path, explicit: Option<&str>) -> String {
                 && let Some(name) = path.file_name().and_then(|s| s.to_str())
             {
                 return name.to_string();
+            }
+        }
+    }
+
+    // Check src/ for any .py file
+    if src_dir.is_dir()
+        && let Ok(entries) = fs::read_dir(&src_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && let Some(ext) = path.extension()
+                && ext == "py"
+                && let Some(name) = path.file_name().and_then(|s| s.to_str())
+            {
+                return format!("src/{name}");
             }
         }
     }
@@ -717,7 +803,7 @@ mod tests {
 
         let recipe = detect_recipe(dir.path()).unwrap();
         assert_eq!(recipe.name, "python-uv");
-        assert_eq!(recipe.run_command, "uv run app.py");
+        assert_eq!(recipe.run_command, "uv run 'app.py'");
         assert_eq!(recipe.preset, Preset::Normal);
     }
 
@@ -736,7 +822,7 @@ mod tests {
         assert_eq!(recipe.preset, Preset::Gpu);
         assert_eq!(
             recipe.run_command,
-            ". .venv/bin/activate && python3 train.py"
+            ". .venv/bin/activate && python3 'train.py'"
         );
     }
 
@@ -811,7 +897,14 @@ mod tests {
 
         let recipe = detect_recipe(&py_file).unwrap();
         assert_eq!(recipe.name, "python-bare");
-        assert_eq!(recipe.run_command, "python3 custom_task.py");
+        assert_eq!(recipe.run_command, "python3 'custom_task.py'");
+    }
+
+    #[test]
+    fn nonexistent_path_bails_early() {
+        let res = detect_recipe(Path::new("/path/that/does/not/exist/ever"));
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("does not exist"));
     }
 
     #[test]

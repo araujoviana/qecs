@@ -93,7 +93,6 @@ pub async fn cmd_shell(ctx: &Ctx, args: ShellArgs) -> anyhow::Result<()> {
         .or_else(|| vm.private_ip.clone())
         .ok_or_else(|| anyhow::anyhow!("VM `{}` has no IP address assigned", vm.name))?;
 
-    let _ = keys::remove_known_host(&ip);
     let relay = connect::Relay::from_config(ctx.config.relay.as_ref())?;
 
     let pb = crate::ui::spinner(format!("Connecting to `{}` ({ip})...", vm.name));

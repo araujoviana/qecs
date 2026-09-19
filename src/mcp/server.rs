@@ -8,10 +8,63 @@ use crate::mcp::protocol::*;
 use crate::mcp::resources::{list_resources, read_resource};
 use crate::mcp::tools::{execute_tool, list_tools};
 
+#[cfg(unix)]
+use std::os::unix::io::FromRawFd;
+
+pub struct StdioIsolation {
+    #[cfg(unix)]
+    orig_stdout_fd: Option<std::os::unix::io::RawFd>,
+}
+
+impl StdioIsolation {
+    pub fn redirect_stdout_to_stderr() -> (Self, Box<dyn std::io::Write + Send>) {
+        #[cfg(unix)]
+        {
+            unsafe {
+                let orig_fd = libc::dup(1);
+                if orig_fd >= 0 {
+                    // Redirect stdout (fd 1) to stderr (fd 2) so any commands calling println! don't corrupt JSON-RPC
+                    libc::dup2(2, 1);
+                    let rpc_file = std::fs::File::from_raw_fd(orig_fd);
+                    return (
+                        StdioIsolation {
+                            orig_stdout_fd: Some(orig_fd),
+                        },
+                        Box::new(std::io::BufWriter::new(rpc_file)),
+                    );
+                }
+            }
+        }
+        (
+            StdioIsolation {
+                #[cfg(unix)]
+                orig_stdout_fd: None,
+            },
+            Box::new(std::io::stdout()),
+        )
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StdioIsolation {
+    fn drop(&mut self) {
+        if let Some(orig_fd) = self.orig_stdout_fd {
+            unsafe {
+                libc::dup2(orig_fd, 1);
+                libc::close(orig_fd);
+            }
+        }
+    }
+}
+
 /// Run the MCP server over standard input and standard output until EOF.
 pub async fn run_stdio(ctx: &Ctx) -> anyhow::Result<()> {
+    let mut mcp_ctx = ctx.clone();
+    mcp_ctx.global.quiet = true;
+    mcp_ctx.global.json = true;
+
+    let (_isolation, mut stdout) = StdioIsolation::redirect_stdout_to_stderr();
     let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
 
     eprintln!(
         "qecs MCP server started (protocol version {MCP_PROTOCOL_VERSION}). Listening on stdio..."
@@ -47,7 +100,7 @@ pub async fn run_stdio(ctx: &Ctx) -> anyhow::Result<()> {
             }
         };
 
-        let resp = dispatch_request(ctx, request).await;
+        let resp = dispatch_request(&mcp_ctx, request).await;
 
         // If the request was a notification (no id), we do not send a response
         if let Some(resp) = resp {

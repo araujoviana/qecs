@@ -84,12 +84,6 @@ pub fn build_ssh_args_full(
         args.push(format!("ProxyCommand={proxy}"));
     }
 
-    if std::env::var_os("DISPLAY").is_some() && pty == Some(true) {
-        args.push("-Y".to_string());
-        args.push("-o".to_string());
-        args.push("ForwardX11Trusted=yes".to_string());
-    }
-
     args.push(format!("ubuntu@{ip}"));
     args
 }
@@ -212,13 +206,13 @@ mod tests {
     }
 
     #[test]
-    fn builds_ssh_arguments_with_x11_forwarding() {
+    fn ssh_never_injects_automatic_x11_forwarding_even_with_display() {
         let key = PathBuf::from("/k");
         unsafe {
             std::env::set_var("DISPLAY", ":0");
         }
         let args = build_ssh_args_ext("1.2.3.4", 22, &key, None, Some(true));
-        assert!(args.contains(&"-Y".to_string()));
-        assert!(args.contains(&"ForwardX11Trusted=yes".to_string()));
+        assert!(!args.contains(&"-Y".to_string()));
+        assert!(!args.contains(&"ForwardX11Trusted=yes".to_string()));
     }
 }

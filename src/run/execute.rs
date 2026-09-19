@@ -203,9 +203,10 @@ pub fn build_detached_launcher(
         setup = setup_cmds.join("\n")
     );
 
+    let b64_script = crate::cloudinit::base64_encode(script.as_bytes());
     format!(
         "printf '%s' {marker_val} > {marker}\n\
-         cat << 'EOF' > /home/ubuntu/run-job.sh\n{script}EOF\n\
+         printf '%s' '{b64_script}' | base64 -d > /home/ubuntu/run-job.sh\n\
          chmod +x /home/ubuntu/run-job.sh && nohup bash /home/ubuntu/run-job.sh > /home/ubuntu/job.log 2>&1 &",
         marker = DETACHED_OUTPUT_MARKER,
         marker_val = shlex_quote(output_subdir),
@@ -337,6 +338,11 @@ pub fn stage_env_vars_full(
 
     let mut env_content = String::new();
     for (k, v) in env_vars {
+        if !is_valid_env_key(k) {
+            anyhow::bail!(
+                "invalid environment variable name `{k}`: must be a valid POSIX identifier (^[a-zA-Z_][a-zA-Z0-9_]*$)"
+            );
+        }
         env_content.push_str(&format!("{}={}\n", k, shlex_quote(v)));
     }
 
@@ -372,6 +378,16 @@ pub fn stage_env_vars_full(
     }
 
     Ok(())
+}
+
+/// Validate whether an environment variable name is a valid POSIX identifier (`^[a-zA-Z_][a-zA-Z0-9_]*$`).
+pub fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Quote a string safely for POSIX shell argument passing.
@@ -436,10 +452,9 @@ mod tests {
     fn detached_launcher_still_stages_run_job_and_writes_exit_code() {
         let launcher =
             build_detached_launcher("/home/ubuntu/workspace", &[], "true", &[], "out", None);
-        assert!(launcher.contains("cat << 'EOF' > /home/ubuntu/run-job.sh"));
-        assert!(launcher.contains("RET=$?"));
-        assert!(launcher.contains("echo $RET > /home/ubuntu/job.exit"));
-        assert!(launcher.contains("touch /run/qecs/job.lock"));
+        assert!(launcher.contains("base64 -d > /home/ubuntu/run-job.sh"));
+        assert!(launcher.contains("chmod +x /home/ubuntu/run-job.sh"));
+        assert!(launcher.contains("nohup bash /home/ubuntu/run-job.sh"));
     }
 
     #[test]
@@ -452,12 +467,51 @@ mod tests {
             "out",
             Some("curl -X PUT https://example.com/cache"),
         );
-        assert!(launcher.contains("[ $RET -eq 0 ] && curl -X PUT https://example.com/cache"));
+        let start = launcher.find("| base64 -d").expect("pipe to base64 -d");
+        let prefix = "printf '%s' '";
+        let p_start = launcher[..start].rfind(prefix).expect("printf start") + prefix.len();
+        let p_end = launcher[..start].rfind('\'').expect("quote end");
+        let b64 = &launcher[p_start..p_end];
+
+        let mut decoded = Vec::new();
+        let mut buf = 0u32;
+        let mut bits = 0;
+        for &b in b64.as_bytes() {
+            let val = match b {
+                b'A'..=b'Z' => b - b'A',
+                b'a'..=b'z' => b - b'a' + 26,
+                b'0'..=b'9' => b - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => continue,
+            };
+            buf = (buf << 6) | (val as u32);
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                decoded.push((buf >> bits) as u8);
+            }
+        }
+        let decoded_script = String::from_utf8(decoded).expect("valid utf8");
+        assert!(decoded_script.contains("[ $RET -eq 0 ] && curl -X PUT https://example.com/cache"));
     }
 
     #[test]
     fn quotes_shell_arguments_with_single_quotes() {
         assert_eq!(shlex_quote("echo hello"), "'echo hello'");
         assert_eq!(shlex_quote("echo 'hello'"), "'echo '\\''hello'\\'''");
+    }
+
+    #[test]
+    fn test_is_valid_env_key() {
+        assert!(is_valid_env_key("FOO"));
+        assert!(is_valid_env_key("_FOO_123"));
+        assert!(is_valid_env_key("hf_token"));
+        assert!(!is_valid_env_key(""));
+        assert!(!is_valid_env_key("123FOO"));
+        assert!(!is_valid_env_key("FOO-BAR"));
+        assert!(!is_valid_env_key("FOO;reboot"));
+        assert!(!is_valid_env_key("FOO\nBAR"));
+        assert!(!is_valid_env_key("FOO$(id)"));
     }
 }

@@ -57,6 +57,29 @@ impl VmLease {
     }
 }
 
+impl Drop for VmLease {
+    fn drop(&mut self) {
+        if !self.disarmed && !self.destroyed {
+            log::warn!(
+                "VmLease for {} ({}) was dropped without teardown() or disarm(). Triggering fallback destruction.",
+                self.record.name,
+                self.record.id
+            );
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let ctx = self.ctx.clone();
+                let id = self.record.id.clone();
+                let name = self.record.name.clone();
+                handle.spawn(async move {
+                    log::info!(
+                        "Executing fallback background teardown for lease VM {name} ({id})..."
+                    );
+                    let _ = crate::commands::run::destroy_vm(&ctx, &id, &name).await;
+                });
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +207,17 @@ mod tests {
         // With dummy context/credentials, destroy_vm fails
         assert!(res.is_err());
         assert!(!lease.is_destroyed());
+    }
+
+    #[tokio::test]
+    async fn test_lease_drop_without_teardown_triggers_safely() {
+        let ctx = dummy_ctx();
+        let record = dummy_record();
+        {
+            let _lease = VmLease::new(ctx, record);
+            // Dropped here without disarm or teardown
+        }
+        // Yield to allow background spawn to execute without crashing
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }

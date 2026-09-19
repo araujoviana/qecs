@@ -82,6 +82,11 @@ pub fn ensure_keypair(key_dir: Option<&Path>) -> anyhow::Result<(KeyPairPaths, S
     };
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating key directory {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
 
     let priv_path = dir.join("id_qecs");
     let pub_path = dir.join("id_qecs.pub");
@@ -106,6 +111,13 @@ pub fn ensure_keypair(key_dir: Option<&Path>) -> anyhow::Result<(KeyPairPaths, S
         if !status.success() {
             anyhow::bail!("ssh-keygen failed with exit code: {:?}", status.code());
         }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&priv_path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o644));
     }
 
     let pub_content = std::fs::read_to_string(&pub_path)
@@ -160,5 +172,23 @@ mod tests {
         assert!(!updated.contains("110.238.107.84"));
         assert!(updated.contains("1.2.3.4 ssh-ed25519 AAAAC3_OTHER_HOST"));
         assert!(updated.contains("# comment"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn keypair_has_restricted_permissions_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let (paths, _) = ensure_keypair(Some(temp.path())).unwrap();
+
+        let dir_mode = std::fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+
+        let priv_mode = std::fs::metadata(&paths.private_key)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(priv_mode, 0o600);
     }
 }

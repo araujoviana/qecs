@@ -33,7 +33,7 @@ pub fn bucket_url(region: &str, bucket: &str) -> String {
 }
 
 /// Metadata for a cached object in OBS.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ObsObject {
     pub key: String,
     pub size_bytes: u64,

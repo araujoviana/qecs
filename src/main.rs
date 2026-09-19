@@ -28,9 +28,21 @@ async fn run(cli: Cli) -> i32 {
         qecs::telemetry::Telemetry::init(enabled, qecs::telemetry::subcommand_label(&cli.command));
     let trace_path = tel.as_ref().map(|t| t.trace_path().to_path_buf());
 
-    let result = match config_res {
-        Ok(ref cfg) => run_command(&cli, cfg, tel.clone()).await,
-        Err(e) => Err(e),
+    let command_future = async {
+        match config_res {
+            Ok(ref cfg) => run_command(&cli, cfg, tel.clone()).await,
+            Err(e) => Err(e),
+        }
+    };
+
+    let result = tokio::select! {
+        res = command_future => res,
+        sig = wait_for_shutdown_signal() => {
+            eprintln!("\nReceived {sig}, aborting...");
+            // Allow active Drop handlers / background tasks a short grace period to execute compensation calls
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            Err(anyhow::anyhow!("Interrupted by {sig}"))
+        }
     };
 
     let code = match result {
@@ -38,6 +50,10 @@ async fn run(cli: Cli) -> i32 {
         Err(e) => {
             if let Some(exit_code) = e.downcast_ref::<error::ExitCode>() {
                 exit_code.0
+            } else if e.to_string().contains("SIGINT") {
+                130
+            } else if e.to_string().contains("SIGTERM") {
+                143
             } else {
                 error::log_error_chain(&e);
                 1
@@ -55,6 +71,25 @@ async fn run(cli: Cli) -> i32 {
     }
 
     code
+}
+
+async fn wait_for_shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = sigint.recv() => "SIGINT",
+            _ = sigterm.recv() => "SIGTERM",
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "SIGINT"
+    }
 }
 
 async fn run_command(

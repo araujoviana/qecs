@@ -21,8 +21,6 @@ pub async fn cmd_up(ctx: &Ctx, args: UpArgs) -> anyhow::Result<()> {
             pb.finish_and_clear();
             let ip = vm.eip.clone().or_else(|| vm.private_ip.clone());
             if let Some(ip) = &ip {
-                let _ = crate::keys::remove_known_host(ip);
-
                 let pb_ssh = crate::ui::spinner(format!(
                     "Waiting for SSH readiness on `{}` ({ip})...",
                     vm.name

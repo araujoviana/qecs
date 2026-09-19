@@ -166,12 +166,14 @@ pub struct AttachArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct InfoArgs {
-    pub name: String,
+    /// Target VM name or prefix (optional if only one VM is active).
+    pub name: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct LogsArgs {
-    pub target: String,
+    /// Target VM name or prefix (optional if only one VM is active).
+    pub target: Option<String>,
     #[arg(short, long)]
     pub follow: bool,
     #[arg(long, help = "View cloud-init bootstrap logs instead of the job log")]

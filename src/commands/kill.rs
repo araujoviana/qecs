@@ -33,7 +33,11 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
         }
 
         if ids.is_empty() {
-            println!("No active VMs tracked to kill.");
+            if ctx.global.json {
+                println!("{}", serde_json::json!({ "deleted": 0, "requested": 0 }));
+            } else {
+                println!("No active VMs tracked to kill.");
+            }
             return Ok(());
         }
 
@@ -59,8 +63,9 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
         for id in &ids {
             if !remaining.iter().any(|s| &s.id == id) {
                 confirmed_deleted += 1;
+                let maybe_rec = store.get(id).ok().flatten();
                 let _ = store.remove(id);
-                if let Ok(Some(r)) = store.get(id) {
+                if let Some(r) = maybe_rec {
                     let _ = store.remove(&r.name);
                     if let Some(ip) = &r.eip {
                         let _ = crate::keys::remove_known_host(ip);
@@ -85,10 +90,20 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
         }
 
         if confirmed_deleted == ids.len() {
-            println!(
-                "{}",
-                format!("✓ Killed {} VM(s).", id_refs.len()).green().bold()
-            );
+            if ctx.global.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "deleted": confirmed_deleted,
+                        "requested": ids.len(),
+                    })
+                );
+            } else {
+                println!(
+                    "{}",
+                    format!("✓ Killed {} VM(s).", id_refs.len()).green().bold()
+                );
+            }
             return Ok(());
         } else if let Err(e) = poll_res {
             return Err(e);
@@ -140,7 +155,18 @@ pub async fn cmd_kill(ctx: &Ctx, args: KillArgs) -> anyhow::Result<()> {
         }
         let _ = store.remove(&vm_name);
         let _ = store.remove(&server_id);
-        println!("{}", format!("✓ VM `{vm_name}` killed.").green().bold());
+        if ctx.global.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "name": vm_name,
+                    "id": server_id,
+                    "status": "deleted",
+                })
+            );
+        } else {
+            println!("{}", format!("✓ VM `{vm_name}` killed.").green().bold());
+        }
         Ok(())
     } else {
         let err = poll_res

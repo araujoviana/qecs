@@ -115,7 +115,7 @@ fn run_dry_run_displays_summary() {
         .success()
         .stdout(predicate::str::contains("=== qecs run Dry-Run Plan ==="))
         .stdout(predicate::str::contains("python-bare"))
-        .stdout(predicate::str::contains("python3 main.py"));
+        .stdout(predicate::str::contains("python3 'main.py'"));
 }
 
 #[test]
@@ -328,6 +328,8 @@ fn run_dry_run_with_command_and_trailing_args() {
     qecs()
         .current_dir(dir.path())
         .args(["run", "--dry-run", "-c", "pytest", "--", "-v", "-s"])
+        .env("QECS_AK", "mock")
+        .env("QECS_SK", "mock")
         .assert()
         .success()
         .stdout(
@@ -344,6 +346,8 @@ fn run_dry_run_with_env_masks_secrets() {
     qecs()
         .current_dir(dir.path())
         .args(["run", "--dry-run", "-e", "HF_TOKEN=hf_abcdef123456"])
+        .env("QECS_AK", "mock")
+        .env("QECS_SK", "mock")
         .assert()
         .success()
         .stdout(
@@ -360,6 +364,8 @@ fn run_dry_run_with_artifacts_flag() {
     qecs()
         .current_dir(dir.path())
         .args(["run", "--dry-run", "-a", "models/*.pt,results.json"])
+        .env("QECS_AK", "mock")
+        .env("QECS_SK", "mock")
         .assert()
         .success()
         .stdout(
@@ -419,6 +425,8 @@ fn attach_without_active_vms_reports_error() {
     let td = tempfile::tempdir().unwrap();
     qecs()
         .env("XDG_STATE_HOME", td.path())
+        .env("QECS_AK", "mock")
+        .env("QECS_SK", "mock")
         .args(["attach"])
         .assert()
         .failure()
@@ -453,6 +461,8 @@ fn mcp_serve_stdio_initialize_and_tools_list() {
 
     let out = qecs()
         .args(["mcp", "serve"])
+        .env("QECS_AK", "mock")
+        .env("QECS_SK", "mock")
         .write_stdin(input)
         .output()
         .unwrap();
@@ -486,4 +496,42 @@ fn mcp_serve_stdio_initialize_and_tools_list() {
     assert!(tool_names.contains(&"qecs_kill"));
     assert!(tool_names.contains(&"qecs_presets"));
     assert!(tool_names.contains(&"qecs_cache_clean"));
+}
+
+#[test]
+fn info_without_target_when_no_vms_reports_error() {
+    let dir = tempfile::tempdir().unwrap();
+    qecs()
+        .args(["info"])
+        .env("XDG_STATE_HOME", dir.path())
+        .env("QECS_AK", "mock")
+        .env("QECS_SK", "mock")
+        .assert()
+        .failure()
+        .code(1);
+}
+
+#[test]
+fn logs_without_target_when_no_vms_reports_error() {
+    let dir = tempfile::tempdir().unwrap();
+    qecs()
+        .args(["logs"])
+        .env("XDG_STATE_HOME", dir.path())
+        .env("QECS_AK", "mock")
+        .env("QECS_SK", "mock")
+        .assert()
+        .failure()
+        .code(1);
+}
+
+#[test]
+fn kill_all_without_active_vms_attempts_cloud_query() {
+    let dir = tempfile::tempdir().unwrap();
+    qecs()
+        .args(["kill", "--all"])
+        .env("XDG_STATE_HOME", dir.path())
+        .env("QECS_AK", "mock")
+        .env("QECS_SK", "mock")
+        .assert()
+        .failure();
 }

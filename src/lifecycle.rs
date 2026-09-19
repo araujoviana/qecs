@@ -61,6 +61,21 @@ pub fn wait_deadline_secs(created_at_rfc3339: &str, ttl_secs: u64) -> u64 {
     (remaining + GRACE).max(0) as u64 + FLOOR
 }
 
+/// Check if an untracked VM is older than the grace threshold (e.g. 15 mins),
+/// preventing race conditions where another `qecs run` or `qecs up` is still booting.
+pub fn is_untracked_vm_old_enough(created: Option<&str>, threshold_minutes: i64) -> bool {
+    match created {
+        Some(created_str) => match chrono::DateTime::parse_from_rfc3339(created_str) {
+            Ok(dt) => {
+                (chrono::Utc::now() - dt.with_timezone(&chrono::Utc)).num_minutes()
+                    >= threshold_minutes
+            }
+            Err(_) => true,
+        },
+        None => true,
+    }
+}
+
 /// Statistics returned by garbage collection / reconciliation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GcStats {
@@ -120,7 +135,8 @@ pub async fn reconcile_and_purge(ctx: &Ctx, force: bool) -> anyhow::Result<GcSta
                 .iter()
                 .any(|r| r.id == s.id || r.name == s.name);
             if !is_tracked {
-                if force {
+                let is_old_enough = is_untracked_vm_old_enough(s.created.as_deref(), 15);
+                if force && is_old_enough {
                     servers_to_delete.push(s.id.as_str());
                 } else {
                     stats.untracked_active_kept.push(s.name.clone());
@@ -224,5 +240,20 @@ mod tests {
 
         assert!(!ttl.is_expired);
         assert_eq!(ttl.human_remaining, "10m");
+    }
+
+    #[test]
+    fn test_is_untracked_vm_old_enough() {
+        // Fresh VM (2 minutes ago) should NOT be old enough for 15-minute threshold
+        let recent = (Utc::now() - Duration::minutes(2)).to_rfc3339();
+        assert!(!is_untracked_vm_old_enough(Some(&recent), 15));
+
+        // Old VM (20 minutes ago) SHOULD be old enough
+        let old = (Utc::now() - Duration::minutes(20)).to_rfc3339();
+        assert!(is_untracked_vm_old_enough(Some(&old), 15));
+
+        // None or unparseable should fall back to true (safe cleanup)
+        assert!(is_untracked_vm_old_enough(None, 15));
+        assert!(is_untracked_vm_old_enough(Some("garbage"), 15));
     }
 }

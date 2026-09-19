@@ -249,6 +249,11 @@ impl Telemetry {
             log::warn!("telemetry: cannot create {}: {e}", dir.display());
             return None;
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        }
         let now = Utc::now();
         let run_id = run_id();
         let name = format!(
@@ -258,7 +263,19 @@ impl Telemetry {
             run_id
         );
         let path = dir.join(&name);
-        let file = match File::create(&path) {
+        #[cfg(unix)]
+        let file_res = {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+        };
+        #[cfg(not(unix))]
+        let file_res = File::create(&path);
+        let file = match file_res {
             Ok(f) => f,
             Err(e) => {
                 log::warn!("telemetry: cannot open trace file {name}: {e}");
@@ -418,13 +435,68 @@ impl Telemetry {
     }
 }
 
-/// Best-effort process args with the leading subcommand token removed.
+/// Best-effort process args with the leading subcommand token removed, with sensitive secrets redacted.
 fn run_args(subcommand: &str) -> Vec<String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(i) = args.iter().position(|a| a == subcommand) {
         args.remove(i);
     }
-    args
+    sanitize_args(args)
+}
+
+/// Redact credentials and sensitive flags from argument lists.
+pub fn sanitize_args(args: Vec<String>) -> Vec<String> {
+    let mut sanitized = Vec::with_capacity(args.len());
+    let mut redact_next = false;
+    let sensitive_flags = [
+        "--ak",
+        "--sk",
+        "-e",
+        "--env",
+        "--token",
+        "--security-token",
+        "--secret",
+        "--password",
+    ];
+
+    for arg in args {
+        if redact_next {
+            if let Some((k, _)) = arg.split_once('=') {
+                sanitized.push(format!("{k}=[REDACTED]"));
+            } else {
+                sanitized.push("[REDACTED]".to_string());
+            }
+            redact_next = false;
+            continue;
+        }
+
+        let mut matched_flag = false;
+        for flag in &sensitive_flags {
+            if &arg == flag {
+                sanitized.push(arg.clone());
+                redact_next = true;
+                matched_flag = true;
+                break;
+            }
+            let prefix = format!("{flag}=");
+            if arg.starts_with(&prefix) {
+                let rest = &arg[prefix.len()..];
+                if let Some((k, _)) = rest.split_once('=') {
+                    sanitized.push(format!("{prefix}{k}=[REDACTED]"));
+                } else {
+                    sanitized.push(format!("{prefix}[REDACTED]"));
+                }
+                matched_flag = true;
+                break;
+            }
+        }
+
+        if !matched_flag {
+            sanitized.push(arg);
+        }
+    }
+
+    sanitized
 }
 
 /// No-op-friendly delegation so call sites can hold `Option<Telemetry>` and call
@@ -999,5 +1071,35 @@ mod tests {
                 })
         };
         digits_dashes(ts, "dddd-dd-ddTdd-dd-ddZ")
+    }
+
+    #[test]
+    fn test_sanitize_args_redacts_secrets() {
+        let raw = vec![
+            "--ak".into(),
+            "MY_AK_12345".into(),
+            "--sk".into(),
+            "MY_SUPER_SECRET_SK".into(),
+            "-e".into(),
+            "API_KEY=secret_val".into(),
+            "--token=sensitive_token".into(),
+            "--normal-arg".into(),
+            "normal_value".into(),
+        ];
+        let sanitized = sanitize_args(raw);
+        assert_eq!(
+            sanitized,
+            vec![
+                "--ak".to_string(),
+                "[REDACTED]".to_string(),
+                "--sk".to_string(),
+                "[REDACTED]".to_string(),
+                "-e".to_string(),
+                "API_KEY=[REDACTED]".to_string(),
+                "--token=[REDACTED]".to_string(),
+                "--normal-arg".to_string(),
+                "normal_value".to_string(),
+            ]
+        );
     }
 }

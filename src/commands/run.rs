@@ -181,8 +181,6 @@ async fn execute_run_pipeline(
         .or_else(|| vm.private_ip.clone())
         .ok_or_else(|| anyhow::anyhow!("VM `{}` has no IP address assigned", vm.name))?;
 
-    let _ = keys::remove_known_host(&ip);
-
     // 7. Await SSH readiness
     let pb = crate::ui::spinner(format!(
         "Waiting for SSH readiness on `{}` ({ip})...",
@@ -264,12 +262,14 @@ async fn execute_run_pipeline(
             )
             .await?;
         pb.finish_and_clear();
-        println!(
-            "{}",
-            "✓ NVIDIA GPU driver and container toolkit ready."
-                .green()
-                .bold()
-        );
+        if !ctx.global.json {
+            println!(
+                "{}",
+                "✓ NVIDIA GPU driver and container toolkit ready."
+                    .green()
+                    .bold()
+            );
+        }
     }
 
     // 10b. Prepare OBS dependency caching
@@ -284,8 +284,11 @@ async fn execute_run_pipeline(
     // already in OBS - tar-ing and re-uploading a multi-GB `.cache`/`.cargo`
     // tree over a bandwidth-capped connection on every single successful run
     // (even when nothing changed) previously cost several minutes for no
+    // 10b. Restore cache from OBS if a matching cache archive already exists.
+    // We check existence first so cold runs don't incur a failed download and
+    // unarchive step; the cache key is deterministic so this check has no race
     // benefit; a HEAD request costs a fraction of a second.
-    let cache_put_url = if let Some(ref key) = cache_key {
+    let (cache_target, cache_put_url_detached) = if let Some(ref key) = cache_key {
         let client = ctx.signed();
         let region = ctx.region();
         let project_id_res = ctx
@@ -296,7 +299,7 @@ async fn execute_run_pipeline(
         if let Ok(project) = project_id_res {
             let bucket = crate::hwc::obs::cache_bucket_name(&region, &project.id);
             let _ = crate::hwc::obs::ensure_cache_bucket(&client, &region, &bucket).await;
-            let arch = std::env::consts::ARCH;
+            let arch = "x86_64";
             let object_key = format!("caches/v1/{arch}-linux/{key}.tar.gz");
 
             let get_url = crate::hwc::obs::generate_presigned_url(
@@ -318,30 +321,36 @@ async fn execute_run_pipeline(
                     .unwrap_or(false);
 
             if already_cached {
-                None
+                (None, None)
             } else {
-                let put_url = crate::hwc::obs::generate_presigned_url(
-                    client.creds(),
-                    &region,
-                    &bucket,
-                    &object_key,
-                    "PUT",
-                    1800,
-                );
-                Some(put_url)
+                let target = Some((region.clone(), bucket.clone(), object_key.clone()));
+                let detached_put = if args.detach {
+                    let detach_expiry = (lease.record().ttl_secs + 3600).clamp(1800, 86400);
+                    Some(crate::hwc::obs::generate_presigned_url(
+                        client.creds(),
+                        &region,
+                        &bucket,
+                        &object_key,
+                        "PUT",
+                        detach_expiry,
+                    ))
+                } else {
+                    None
+                };
+                (target, detached_put)
             }
         } else {
-            None
+            (None, None)
         }
     } else {
-        None
+        (None, None)
     };
 
     // 11. Execution: Detached vs Attached
     let artifact_spec = args.artifacts.as_deref().unwrap_or(&recipe.output_dir);
 
     if args.detach {
-        let cache_upload_cmd = cache_put_url
+        let cache_upload_cmd = cache_put_url_detached
             .as_ref()
             .map(|put_url| build_cache_upload_cmd(put_url));
 
@@ -365,14 +374,18 @@ async fn execute_run_pipeline(
         let _ = store.upsert(updated_vm);
         lease.disarm();
 
-        println!(
-            "{}",
-            format!("✓ Job launched in background on `{}`.", lease.record().name)
-                .green()
-                .bold()
-        );
-        println!("  Stream logs:  qecs logs {} --follow", lease.record().name);
-        println!("  Await result: qecs wait {}", lease.record().name);
+        if ctx.global.json {
+            println!("{}", serde_json::to_string_pretty(&lease.record())?);
+        } else {
+            println!(
+                "{}",
+                format!("✓ Job launched in background on `{}`.", lease.record().name)
+                    .green()
+                    .bold()
+            );
+            println!("  Stream logs:  qecs logs {} --follow", lease.record().name);
+            println!("  Await result: qecs wait {}", lease.record().name);
+        }
         return Ok(());
     }
 
@@ -418,10 +431,19 @@ async fn execute_run_pipeline(
 
     // If attached job succeeded, save cache to OBS
     if exit_code == 0
-        && let Some(ref put_url) = cache_put_url
+        && let Some((ref region, ref bucket, ref object_key)) = cache_target
     {
         let pb = crate::ui::spinner("Saving dependency cache to OBS...");
-        let cache_upload_cmd = build_cache_upload_cmd(put_url);
+        let client = ctx.signed();
+        let fresh_put_url = crate::hwc::obs::generate_presigned_url(
+            client.creds(),
+            region,
+            bucket,
+            object_key,
+            "PUT",
+            1800,
+        );
+        let cache_upload_cmd = build_cache_upload_cmd(&fresh_put_url);
         let _ = execute::run_remote_command_full(
             &ip,
             port,
@@ -574,6 +596,14 @@ fn collect_env_vars(args: &RunArgs) -> anyhow::Result<Vec<(String, String)>> {
             env_map.insert(k.trim().to_string(), v.to_string());
         } else if let Ok(val) = std::env::var(entry) {
             env_map.insert(entry.clone(), val);
+        }
+    }
+
+    for k in env_map.keys() {
+        if !crate::run::execute::is_valid_env_key(k) {
+            anyhow::bail!(
+                "invalid environment variable name `{k}`: must be a valid POSIX identifier (^[a-zA-Z_][a-zA-Z0-9_]*$)"
+            );
         }
     }
 

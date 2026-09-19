@@ -22,6 +22,7 @@ pub struct Server {
     pub port_id: Option<String>,
     pub power_state: i32,
     pub tags: Vec<String>,
+    pub created: Option<String>,
 }
 
 impl Server {
@@ -43,6 +44,7 @@ impl Server {
                     .collect()
             })
             .unwrap_or_default();
+        let created = v.get("created").and_then(Value::as_str).map(str::to_string);
         Ok(Server {
             id: req("id")?,
             name: req("name")?,
@@ -57,6 +59,7 @@ impl Server {
             port_id,
             power_state: v["OS-EXT-STS:power_state"].as_i64().unwrap_or(0) as i32,
             tags,
+            created,
         })
     }
 }
@@ -371,12 +374,14 @@ mod tests {
             "OS-EXT-AZ:availability_zone":"ap-southeast-3a",
             "OS-EXT-STS:power_state":1,
             "flavor":{"id":"s7n.2xlarge.2"},
-            "addresses":{}
+            "addresses":{},
+            "created":"2026-09-19T10:00:00Z"
         });
         let s = Server::from_raw(&raw).unwrap();
         assert_eq!(s.az, "ap-southeast-3a");
         assert_eq!(s.flavor, "s7n.2xlarge.2");
         assert_eq!(s.power_state, 1);
+        assert_eq!(s.created.as_deref(), Some("2026-09-19T10:00:00Z"));
     }
 
     #[test]

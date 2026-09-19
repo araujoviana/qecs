@@ -147,6 +147,44 @@ fn parse_env_file(path: &Path) -> Option<Credentials> {
     })
 }
 
+fn read_secret(prompt_msg: &str) -> anyhow::Result<String> {
+    print!("{prompt_msg}");
+    std::io::stdout().flush()?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = std::io::stdin().as_raw_fd();
+        let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+        let is_tty = unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) == 0 };
+
+        if is_tty {
+            let original = unsafe { termios.assume_init() };
+            let mut raw = original;
+            raw.c_lflag &= !libc::ECHO;
+            unsafe {
+                libc::tcsetattr(fd, libc::TCSANOW, &raw);
+            }
+
+            let mut secret = String::new();
+            let res = std::io::stdin().read_line(&mut secret);
+
+            // Restore original terminal attributes (enable ECHO)
+            unsafe {
+                libc::tcsetattr(fd, libc::TCSANOW, &original);
+            }
+            println!(); // print newline after masked input
+
+            res?;
+            return Ok(secret.trim().to_string());
+        }
+    }
+
+    let mut secret = String::new();
+    std::io::stdin().read_line(&mut secret)?;
+    Ok(secret.trim().to_string())
+}
+
 fn prompt() -> anyhow::Result<Credentials> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         anyhow::bail!("no credentials and stdin is not a terminal");
@@ -155,10 +193,9 @@ fn prompt() -> anyhow::Result<Credentials> {
     std::io::stdout().flush()?;
     let mut ak = String::new();
     std::io::stdin().read_line(&mut ak)?;
-    print!("Huawei Cloud SK: ");
-    std::io::stdout().flush()?;
-    let mut sk = String::new();
-    std::io::stdin().read_line(&mut sk)?;
+
+    let sk = read_secret("Huawei Cloud SK: ")?;
+
     Ok(Credentials {
         ak: ak.trim().into(),
         sk: sk.trim().into(),
